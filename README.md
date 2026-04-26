@@ -1,173 +1,144 @@
-# 🏛️ Exhibition Data Hub
+# Exhibition Data Hub
 
-전국 전시회 정보 데이터 수집 프로젝트입니다. 전국의 숨겨진 전시 정보를 수집하는 것을 목표로 합니다.
+전국 전시 기관 데이터를 수집하고, 기관 홈페이지에서 전시 정보를 추출하는 Python 프로젝트입니다.
 
-## 🛠️ Tech Stack
-- **Language:** Python (3.14)
-- **Editor:** VS Code
-- **Data Source:** 네이버 검색 API (지역), 구글 스프레드시트
+## What This Project Does
 
-## 🔐 환경 변수 설정 (네이버 API)
+이 저장소에는 두 개의 주요 수집 스크립트가 있습니다.
 
-네이버 검색 API 키는 환경 변수로 관리합니다.
+1. `src/collect_naver_local.py`
+- 네이버 지역 검색 API로 전시/문화 관련 기관 후보를 수집
+- 결과 CSV 생성
 
-1. `.env.example`를 복사해서 `.env` 파일 생성
-2. `.env`에 아래 값 입력
+2. `src/collect_exhibition_events.py`
+- 기관 홈페이지(여러 URL 포함)에서 전시명/기간/가격/설명을 추출
+- 정적 HTML 파싱 → JS 렌더링(선택) → 이미지 OCR(선택) 순서로 탐색
+- 중단 시 체크포인트 저장 지원
 
-```env
-NAVER_CLIENT_ID=YOUR_CLIENT_ID
-NAVER_CLIENT_SECRET=YOUR_CLIENT_SECRET
-```
+## Requirements
 
-`.env`는 `.gitignore`에 추가되어 Git에 커밋되지 않습니다.
+- Python 3.14
+- (선택) OCR 사용 시 시스템 Tesseract OCR 엔진
+- (선택) JS 렌더링 사용 시 Playwright 브라우저
 
-## � 가상 환경 설정
+## Setup
 
-### 가상 환경 생성 및 활성화
+### 1) 가상 환경
 
-```bash
-# 가상 환경 생성
-python -m venv venv
+Windows:
 
-# 가상 환경 활성화
-# Windows
-venv\Scripts\activate
-# macOS / Linux
-source venv/bin/activate
-```
+python -m venv .venv
+.venv\Scripts\activate
 
-### 의존성 설치
+macOS/Linux:
 
-현재 스크립트는 Python 표준 라이브러리만 사용하므로 추가 설치가 필요하지 않습니다.  
-만약 추후 라이브러리를 추가할 경우 아래 명령으로 설치하면 됩니다.
+python -m venv .venv
+source .venv/bin/activate
 
-```bash
+### 2) 패키지 설치
+
 pip install -r requirements.txt
-```
 
-## �📊 데이터 수집 스키마 (CSV/Excel 구조)
+### 3) Playwright 브라우저 설치 (JS 렌더링 사용할 때만)
 
-수집되는 모든 데이터는 CSV 및 Excel로 관리하며, 각 컬럼(열)의 정의는 다음과 같습니다.
+python -m playwright install chromium
 
-| 항목 | 컬럼명(CSV 기준) | 데이터 예시 | 비고 |
-| :--- | :--- | :--- | :--- |
-| **전시명** | `title` | 완주 로컬 작가 3인전 | |
-| **시작일** | `start_date` | 2026-04-15 | YYYY-MM-DD 형식 고정 |
-| **종료일** | `end_date` | 2026-05-10 | YYYY-MM-DD 형식 고정 |
-| **전체 주소** | `full_address` | 도시 구군 읍면리 ••• | 지번 주소 (address) |
-| **도로명 주소** | `road_address` | 서울특별시 중구 을지로15길 6-5 | 도로명 주소 (roadAddress) |
-| **대분류** | `region_main` | 도시 | 주소 기반 자동 파싱 |
-| **중분류** | `region_sub` | 구군 | 주소 기반 자동 파싱 (광역시는 X) |
-| **소분류** | `region_detail` | 읍면리 | 주소 기반 자동 파싱 |
-| **URL** | `official_url` | https://••• | 공식 사이트 또는 SNS 정보 |
-| **요약 정보** | `summary` | 숲을 주제로 한 서양화 전시 ••• | 전시회 내용 요약 |
-| **전화번호** | `tel` | xxx(x)-xxx(x)-xxxx | API에서 비어 있을 수 있음 |
-| **전시관 종류** | `category` | 미술관 / 문화예술회관 / 갤러리 등 | 태그 형태로 관리 |
-| **입장료 정보** | `price` | 무료 / 유료 / 정보 없음 | 무료/유료 구분(불명확 시 정보 없음) |
-| **경도 (X)** | `mapx` | 311277 | WGS84 좌표계 기준 X(경도) |
-| **위도 (Y)** | `mapy` | 552097 | WGS84 좌표계 기준 Y(위도) |
+### 4) 환경 변수 파일 생성
 
-## 🧭 주소 파싱 및 좌표 참고
+.env.example을 복사해 .env 파일을 만들고 값을 채웁니다.
 
-- 기본 구현은 주소 문자열 공백 분리로 `region_main`, `region_sub`, `region_detail`를 채웁니다.
-- 정밀도를 높이려면 도로명주소 API 연동 라이브러리(`juso`) 또는 행정구역 코드 데이터(법정동 코드)와 함께 검증하는 방식을 권장합니다.
-- 현재 수집 스크립트에는 교체 가능한 함수 `parse_address_parts()`가 포함되어 있어, 추후 정교한 주소 파싱 로직으로 확장할 수 있습니다.
+필수:
+- NAVER_CLIENT_ID
+- NAVER_CLIENT_SECRET
 
-### 좌표계 정보
-- **mapx/mapy**: 네이버 지역 검색 API에서 제공하는 WGS84 기준 좌표입니다.
-- mapx는 경도(Longitude/X), mapy는 위도(Latitude/Y)에 해당합니다.
-- 지도 시각화, 거리 계산 등 공간 분석 시 활용할 수 있습니다.
-- 좌표 값이 없는 경우 CSV에서 빈 공간으로 저장됩니다.
+선택:
+- NAVER_LOCAL_SORT (random 또는 comment, 기본값 random)
+- TESSERACT_CMD (PATH로 못 찾을 때 Tesseract 실행 파일 절대 경로)
 
-## 🔎 네이버 지역 검색 수집 스크립트
+Windows 예시:
 
-블로그 검색 예제를 지역 검색으로 변경한 파이썬 스크립트는 `src/collect_naver_local.py`입니다.
+TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
 
-- API 엔드포인트: `https://openapi.naver.com/v1/search/local.json`
-- 검색어 형식: `"{지역} {키워드}"`
-- 요청 파라미터: `query`(필수), `display`(1~5), `start`(1 고정), `sort`(`random`/`comment`)
-- 지역 목록 파일: `docs/regions.md`
-- 키워드 목록 파일: `docs/keywords.md`
+## Input Files
 
-### 실행 방법
+- docs/regions.md
+- docs/keywords.md
+- data/test_naver_local_exhibitions.csv (이벤트 추출 기본 입력)
 
-```bash
+## Script 1: Local Institution Collection
+
+실행:
+
 python src/collect_naver_local.py
-```
 
-실행 결과는 `data/naver_local_exhibitions.csv`로 저장됩니다.
+출력:
 
-### 지역 목록 관리
+- data/naver_local_exhibitions.csv
 
-`docs/regions.md`에 아래처럼 지역을 한 줄씩 작성하면 됩니다.
+설명:
 
-```md
-- 서울
-- 부산
-- 전주
-```
+- docs/regions.md와 docs/keywords.md의 조합으로 네이버 지역 검색 API를 호출합니다.
+- 중복 기관은 제목/주소/공식 URL 조합으로 제거합니다.
 
-### 키워드 목록 관리
+## Script 2: Exhibition Event Extraction
 
-`docs/keywords.md`에 검색 키워드를 한 줄씩 작성하면 됩니다.
+기본 실행:
 
-```md
-- 국립박물관
-- 시립미술관
-- 아트페어
-```
-
-스크립트는 `지역 목록 × 키워드 목록`의 전체 조합으로 검색합니다.
-
-## 📁 폴더 구조
-- `/src`: Python 수집 엔진 소스 코드
-- `/data`: 지역별 수집 완료 데이터 (CSV, XLSX)
-- `/docs`: .md 형식의 지역명 리스트 및 조사 매뉴얼
-
-## 🤖 홈페이지 자동 추출 파이프라인
-
-도메인이 서로 다른 기관 홈페이지에서 전시 정보를 자동 수집하기 위해, 아래 3단계 파이프라인을 제공합니다.
-
-1. 기관 정제: 전시 관련 기관만 선별
-2. 페이지 탐색: 홈페이지 + sitemap + 전시 관련 링크 탐색
-3. 전시 추출: 전시명/기간/가격(무료/유료) 추출
-
-실행 스크립트는 `src/collect_exhibition_events.py`입니다.
-
-### 실행 예시
-
-빠른 테스트 (기관 20개 제한):
-
-```bash
-python src/collect_exhibition_events.py --max-institutions 20
-```
-
-전체 실행:
-
-```bash
 python src/collect_exhibition_events.py
-```
 
-### 출력 파일
+자주 쓰는 실행 예시:
 
-- `data/filtered_exhibition_institutions.csv`
-	- 전시 관련 기관 목록
-- `data/discovered_exhibition_pages.csv`
-	- 기관별 전시 후보 페이지 URL
-- `data/extracted_exhibitions.csv`
-	- 추출된 전시 정보 (전시명, 시작일, 종료일, 가격 유형, 근거 텍스트)
-- `data/curated_exhibitions.csv`
-	- 신뢰도 기준(`--min-confidence`) 이상인 우선 활용 데이터
-- `data/rejected_exhibitions.csv`
-	- 신뢰도 기준 미만인 검수 대상 데이터
+빠른 테스트:
 
-### 주요 옵션
+python src/collect_exhibition_events.py --max-institutions 20
 
-- `--max-institutions`: 테스트용 기관 수 제한 (0이면 전체)
-- `--max-pages-per-institution`: 기관당 탐색 페이지 수 제한
-- `--timeout`: 요청 타임아웃(초)
-- `--pause`: 페이지 요청 간 대기 시간(초)
-- `--min-confidence`: 자동 채택 최소 신뢰도 (기본값 `0.85`)
+JS 렌더링 포함:
 
-기관별 중복 통합은 자동으로 수행됩니다. 동일 기관에서 같은 전시가 여러 페이지에서 발견되면,
-신뢰도/가격 정보/근거 텍스트 길이를 기준으로 대표 1건으로 합쳐 저장합니다.
+python src/collect_exhibition_events.py --enable-js-render --js-render-timeout-ms 12000
+
+OCR 포함:
+
+python src/collect_exhibition_events.py --enable-image-ocr --max-images-per-page 3
+
+전체 옵션 조합 예시:
+
+python src/collect_exhibition_events.py --enable-js-render --enable-image-ocr --save-every 10
+
+### Main Output Files
+
+- data/extracted_exhibitions.csv
+- data/failed_domains.csv
+
+### 주요 옵션 (기본값)
+
+- --input (data/test_naver_local_exhibitions.csv)
+- --output (data/extracted_exhibitions.csv)
+- --failed-domains-out (data/failed_domains.csv)
+- --timeout (8)
+- --pause (0.15)
+- --max-pages-per-institution (8)
+- --max-base-urls-per-institution (3)
+- --max-institutions (0, 전체)
+- --min-confidence (0.75)
+- --save-every (25)
+- --enable-js-render
+- --js-render-timeout-ms (12000)
+- --enable-image-ocr
+- --max-images-per-page (3)
+
+## OCR Notes
+
+- Python 패키지: Pillow, pytesseract
+- 시스템 엔진: Tesseract OCR 설치 필요
+- 코드에서 TESSERACT_CMD 또는 일반 PATH, Windows 기본 설치 경로를 순서대로 탐지합니다.
+
+## Repository Structure
+
+- src: 수집 스크립트
+- docs: 지역/키워드 목록
+- data: 입력 및 결과 CSV
+
+## Git Ignore Policy
+
+- .env, 캐시, 가상환경, 테스트/스모크 산출물 CSV는 .gitignore로 제외합니다.
+- 기본 입력/대표 결과 파일은 필요에 따라 유지할 수 있습니다.
