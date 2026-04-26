@@ -1,0 +1,26 @@
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Environment variables
+.env
+
+# Data outputs
+*.log
+data/*_test.csv
+data/*_smoke.csv
+data/tmp.csv
+data/discovered_exhibition_pages.csv
+data/filtered_exhibition_institutions.csv
+data/rejected_exhibitions.csv
+data/curated_exhibitions.csv
+
+# OS junk files
+.DS_Store
+Thumbs.db
