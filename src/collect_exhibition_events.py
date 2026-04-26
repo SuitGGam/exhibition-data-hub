@@ -4,6 +4,7 @@ import html
 import json
 import os
 import re
+import shutil
 import sys
 import time
 import urllib.parse
@@ -144,8 +145,6 @@ STRONG_EVENT_TITLE_KEYWORDS = [
     "학위청구",
     "오픈스튜디오",
     "레지던시",
-    "전시안내",
-    "전시 일정",
 ]
 
 GENERIC_EVENT_LABELS = {
@@ -176,6 +175,61 @@ EXCLUDE_EVENT_TEXT_KEYWORDS = [
     "문의",
 ]
 
+NAVIGATION_NOISE_KEYWORDS = [
+    "로그인",
+    "회원가입",
+    "마이페이지",
+    "사이트맵",
+    "개인정보처리방침",
+    "이용약관",
+    "저작권",
+    "전체메뉴",
+    "메뉴",
+    "검색",
+    "공지사항",
+    "오시는길",
+    "바로가기",
+    "고객센터",
+    "패밀리사이트",
+]
+
+EDITORIAL_NOISE_KEYWORDS = [
+    "webzine",
+    "인터뷰",
+    "insight",
+    "news",
+    "press",
+    "보도",
+    "기사",
+    "소식",
+]
+
+WEAK_EVENT_ONLY_KEYWORDS = {
+    "전시",
+    "전시안내",
+    "전시 일정",
+    "전시일정",
+    "현재전시",
+    "예정전시",
+    "과거전시",
+}
+
+STRONG_EVENT_CONTEXT_KEYWORDS = [
+    "개인전",
+    "기획전",
+    "특별전",
+    "초대전",
+    "그룹전",
+    "아트페어",
+    "비엔날레",
+    "트리엔날레",
+    "사진전",
+    "조각전",
+    "졸업전시",
+    "학위청구",
+    "레지던시",
+]
+
 LOCATION_TEXT_KEYWORDS = [
     "전시실",
     "전시장소",
@@ -197,6 +251,27 @@ DATE_RANGE_PATTERN = re.compile(
 )
 SINGLE_DATE_PATTERN = re.compile(r"(\d{4}[./-]\d{1,2}[./-]\d{1,2})")
 IMAGE_EXT_PATTERN = re.compile(r"\.(?:png|jpg|jpeg|webp|gif)(?:$|[?#])", re.IGNORECASE)
+IMAGE_HINT_KEYWORDS = [
+    "poster",
+    "flyer",
+    "exhibition",
+    "event",
+    "schedule",
+    "program",
+    "notice",
+    "banner",
+    "전시",
+    "전시회",
+    "포스터",
+    "일정",
+    "행사",
+    "공지",
+    "안내",
+]
+KNOWN_TESSERACT_PATHS = [
+    r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+    r"C:\\Program Files (x86)\\Tesseract-OCR\\tesseract.exe",
+]
 
 
 @dataclass
@@ -313,7 +388,12 @@ class ImageExtractor(HTMLParser):
             return
 
         attrs_map = {k.lower(): (v or "") for k, v in attrs}
-        src = attrs_map.get("src", "")
+        src = attrs_map.get("src", "") or attrs_map.get("data-src", "") or attrs_map.get("data-lazy-src", "")
+        if not src:
+            srcset = attrs_map.get("srcset", "")
+            if srcset:
+                first_candidate = srcset.split(",", 1)[0].strip().split(" ", 1)[0].strip()
+                src = first_candidate
         if not src:
             return
 
@@ -690,17 +770,134 @@ def extract_image_candidates(html_text: str, page_url: str) -> list[dict[str, st
                 "url": normalized,
                 "alt": image.get("alt", ""),
                 "title": image.get("title", ""),
+                "score": f"{score_image_candidate(normalized, image.get('alt', ''), image.get('title', '')):.2f}",
             }
         )
 
+    candidates.sort(key=lambda item: float(item.get("score", "0") or 0), reverse=True)
     return candidates
+
+
+def score_image_candidate(url: str, alt: str, title: str) -> float:
+    meta = normalize_text(" ".join([url, alt, title])).lower()
+    score = 0.0
+
+    if any(key in meta for key in IMAGE_HINT_KEYWORDS):
+        score += 0.45
+    if any(term in meta for term in ["poster", "flyer", "전시", "포스터"]):
+        score += 0.25
+    if IMAGE_EXT_PATTERN.search(url.lower()):
+        score += 0.1
+    if len(normalize_text(alt)) >= 6:
+        score += 0.1
+    if len(normalize_text(title)) >= 6:
+        score += 0.1
+
+    return min(score, 1.0)
+
+
+def preprocess_ocr_image(image: object) -> list[object]:
+    try:
+        from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+    except ImportError:
+        return []
+
+    if not isinstance(image, Image.Image):
+        return []
+
+    base = ImageOps.exif_transpose(image).convert("RGB")
+    variants = [base]
+
+    gray = ImageOps.grayscale(base)
+    gray = ImageOps.autocontrast(gray)
+
+    scale = 2
+    resized = gray.resize((max(1, gray.width * scale), max(1, gray.height * scale)), Image.Resampling.LANCZOS)
+    resized = ImageEnhance.Sharpness(resized).enhance(1.4)
+    resized = resized.filter(ImageFilter.SHARPEN)
+    variants.append(resized)
+
+    for threshold in (160, 180, 200):
+        thresholded = resized.point(lambda p, t=threshold: 255 if p > t else 0)
+        variants.append(thresholded)
+
+    return variants
+
+
+def score_ocr_text(text: str) -> float:
+    normalized = normalize_text(text)
+    if not normalized:
+        return 0.0
+
+    score = min(len(normalized) / 120.0, 0.35)
+    if DATE_RANGE_PATTERN.search(normalized):
+        score += 0.3
+    if SINGLE_DATE_PATTERN.search(normalized):
+        score += 0.12
+    if any(key in normalized for key in STRONG_EVENT_TITLE_KEYWORDS):
+        score += 0.2
+    if any(ch in normalized for ch in ["《", "》", "‘", "’", "“", "”"]):
+        score += 0.1
+    if any(term in normalized for term in ["전시", "개인전", "기획전", "특별전", "초대전", "그룹전"]):
+        score += 0.15
+
+    return min(score, 1.0)
+
+
+def run_tesseract_ocr_variants(image: object) -> str:
+    try:
+        import pytesseract
+    except ImportError:
+        return ""
+
+    tesseract_cmd = resolve_tesseract_command()
+    if not tesseract_cmd:
+        return ""
+    pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+
+    configs = [
+        "--oem 3 --psm 6",
+        "--oem 3 --psm 11",
+        "--oem 3 --psm 12",
+    ]
+
+    best_text = ""
+    best_score = 0.0
+    for variant in preprocess_ocr_image(image):
+        for config in configs:
+            try:
+                text = normalize_text(pytesseract.image_to_string(variant, lang="kor+eng", config=config))
+            except Exception:  # noqa: BLE001
+                continue
+
+            score = score_ocr_text(text)
+            if score > best_score or (score == best_score and len(text) > len(best_text)):
+                best_score = score
+                best_text = text
+
+    return best_text
+
+
+def resolve_tesseract_command() -> str:
+    env_value = normalize_text(os.environ.get("TESSERACT_CMD", ""))
+    if env_value and Path(env_value).exists():
+        return env_value
+
+    detected = shutil.which("tesseract")
+    if detected:
+        return detected
+
+    for candidate in KNOWN_TESSERACT_PATHS:
+        if Path(candidate).exists():
+            return candidate
+
+    return ""
 
 
 def extract_ocr_text_from_image(image_url: str, timeout: int) -> str:
     try:
         import io
         from PIL import Image
-        import pytesseract
     except ImportError:
         return ""
 
@@ -718,8 +915,12 @@ def extract_ocr_text_from_image(image_url: str, timeout: int) -> str:
     if not data:
         return ""
 
-    img = Image.open(io.BytesIO(data))
-    return normalize_text(pytesseract.image_to_string(img, lang="kor+eng"))
+    try:
+        img = Image.open(io.BytesIO(data))
+    except Exception:  # noqa: BLE001
+        return ""
+
+    return run_tesseract_ocr_variants(img)
 
 
 def normalize_date_text(value: str, reference_year: int | None = None) -> str:
@@ -764,9 +965,53 @@ def event_title_score(line: str, keyword_hints: list[str]) -> float:
         score += 0.2
     if "전시" in line:
         score += 0.35
-    if any(ch in line for ch in ["《", "》", "[", "]"]):
+    if any(ch in line for ch in ["《", "》", "‘", "’", "“", "”"]):
         score += 0.2
     return min(score, 1.0)
+
+
+def looks_like_navigation_noise(line: str) -> bool:
+    compact = normalize_text(line)
+    if not compact:
+        return True
+
+    if re.fullmatch(r"[\d\W_]+", compact):
+        return True
+
+    if any(term in compact for term in NAVIGATION_NOISE_KEYWORDS):
+        return True
+
+    lowered = compact.lower()
+    if any(token in lowered for token in ["http://", "https://", "www."]):
+        return True
+
+    if compact.count("|") >= 2 or compact.count(">") >= 2:
+        return True
+
+    return False
+
+
+def looks_like_editorial_noise(line: str) -> bool:
+    compact = normalize_text(line)
+    lowered = compact.lower()
+
+    if re.match(r"^\[(news|eng|artist|special|insight)\]", lowered):
+        return True
+
+    if any(term in lowered for term in EDITORIAL_NOISE_KEYWORDS):
+        return True
+
+    return False
+
+
+def has_strong_event_signal(line: str) -> bool:
+    if any(key in line for key in STRONG_EVENT_CONTEXT_KEYWORDS):
+        return True
+
+    if any(ch in line for ch in ["《", "》", "‘", "’", "“", "”"]):
+        return True
+
+    return False
 
 
 def parse_jsonld_events(html_text: str) -> list[dict[str, str]]:
@@ -826,14 +1071,29 @@ def parse_text_events(lines: list[str], keyword_hints: list[str]) -> list[dict[s
     events: list[dict[str, str]] = []
 
     for idx, line in enumerate(lines):
+        if looks_like_navigation_noise(line):
+            continue
+
         if any(term in line for term in EXCLUDE_EVENT_TEXT_KEYWORDS):
             continue
 
+        if looks_like_editorial_noise(line):
+            continue
+
         line_has_strong_title = any(key in line for key in STRONG_EVENT_TITLE_KEYWORDS) or any(
-            ch in line for ch in ["《", "》", "[", "]"]
+            ch in line for ch in ["《", "》", "‘", "’", "“", "”"]
         )
+
+        if not line_has_strong_title and any(weak in line for weak in WEAK_EVENT_ONLY_KEYWORDS):
+            if not has_strong_event_signal(line):
+                continue
+
         if any(term in line for term in LOCATION_TEXT_KEYWORDS) and not line_has_strong_title:
             continue
+
+        if "전시실" in line and any(token in line for token in ["/", "제 1", "제1", "제 2", "제2", "기획전시실"]):
+            if not any(key in line for key in ["개인전", "특별전", "초대전", "그룹전", "비엔날레", "아트페어", "사진전", "조각전"]):
+                continue
 
         title_score = event_title_score(line, keyword_hints)
         if title_score < 0.5:
@@ -841,8 +1101,13 @@ def parse_text_events(lines: list[str], keyword_hints: list[str]) -> list[dict[s
 
         window = lines[max(0, idx - 3): min(len(lines), idx + 4)]
         context = " | ".join(window)
+
         if any(term in context for term in EXCLUDE_EVENT_TEXT_KEYWORDS):
             continue
+
+        if not line_has_strong_title and not has_strong_event_signal(line):
+            if not any(key in context for key in STRONG_EVENT_CONTEXT_KEYWORDS):
+                continue
 
         if any(term in line for term in ["전시실", "전시장소", "장소", "운영", "예약", "프로그램"]):
             if not line_has_strong_title:
