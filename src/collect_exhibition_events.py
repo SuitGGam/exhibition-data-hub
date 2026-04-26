@@ -21,8 +21,25 @@ DEFAULT_TIMEOUT_SECONDS = 8
 DEFAULT_PAUSE_SECONDS = 0.15
 DEFAULT_HTTP_RETRY_COUNT = 2
 DEFAULT_MAX_PAGES_PER_INSTITUTION = 8
+DEFAULT_MAX_BASE_URLS_PER_INSTITUTION = 3
+DEFAULT_MAX_IMAGES_PER_PAGE = 3
 DEFAULT_MAX_INSTITUTIONS = 0
 DEFAULT_MIN_CONFIDENCE = 0.75
+DEFAULT_SAVE_EVERY = 25
+DEFAULT_JS_RENDER_TIMEOUT_MS = 12000
+
+URL_SOURCE_FIELDS = [
+    "official_url",
+    "link",
+    "homepage_url",
+    "homepage_urls",
+    "website",
+    "websites",
+    "url",
+    "urls",
+    "blog_url",
+    "instagram_url",
+]
 
 EXCLUDE_CATEGORY_KEYWORDS = [
     "자동차",
@@ -179,6 +196,7 @@ DATE_RANGE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 SINGLE_DATE_PATTERN = re.compile(r"(\d{4}[./-]\d{1,2}[./-]\d{1,2})")
+IMAGE_EXT_PATTERN = re.compile(r"\.(?:png|jpg|jpeg|webp|gif)(?:$|[?#])", re.IGNORECASE)
 
 
 @dataclass
@@ -187,6 +205,7 @@ class Institution:
     title: str
     category: str
     official_url: str
+    official_urls: list[str]
     region_main: str
     region_sub: str
     source_query: str
@@ -284,6 +303,29 @@ class JsonLdExtractor(HTMLParser):
             self._buffer = []
 
 
+class ImageExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.images: list[dict[str, str]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "img":
+            return
+
+        attrs_map = {k.lower(): (v or "") for k, v in attrs}
+        src = attrs_map.get("src", "")
+        if not src:
+            return
+
+        self.images.append(
+            {
+                "src": src,
+                "alt": normalize_text(attrs_map.get("alt", "")),
+                "title": normalize_text(attrs_map.get("title", "")),
+            }
+        )
+
+
 def normalize_text(value: str) -> str:
     return " ".join((value or "").split())
 
@@ -342,6 +384,39 @@ def canonical_url(raw_url: str) -> str:
     return urllib.parse.urlunparse((parsed.scheme, parsed.netloc.lower(), parsed.path or "/", "", "", ""))
 
 
+def split_candidate_urls(raw_value: str) -> list[str]:
+    value = normalize_text(html.unescape(raw_value or ""))
+    if not value:
+        return []
+
+    extracted = re.findall(r"(?:https?://|www\.)[^\s|,;]+", value, flags=re.IGNORECASE)
+    tokens = extracted if extracted else re.split(r"[|,;\n\r\t]+", value)
+
+    urls: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        normalized = canonical_url(token)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        urls.append(normalized)
+    return urls
+
+
+def collect_institution_urls(row: dict[str, str]) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+
+    for field in URL_SOURCE_FIELDS:
+        for candidate in split_candidate_urls(row.get(field, "")):
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            urls.append(candidate)
+
+    return urls
+
+
 def same_domain(url_a: str, url_b: str) -> bool:
     return urllib.parse.urlparse(url_a).netloc.lower() == urllib.parse.urlparse(url_b).netloc.lower()
 
@@ -363,25 +438,67 @@ def is_exhibition_related(row: dict[str, str], keyword_hints: list[str]) -> bool
 
 def load_institutions(input_csv: Path, keyword_hints: list[str]) -> list[Institution]:
     rows = list(csv.DictReader(input_csv.open(encoding="utf-8-sig")))
-    institutions: list[Institution] = []
-    seen: set[str] = set()
+    merged: dict[tuple[str, str, str], dict[str, str | list[str] | set[str]]] = {}
 
     for row in rows:
         if not is_exhibition_related(row, keyword_hints):
             continue
-        official = canonical_url(row.get("official_url", "")) or canonical_url(row.get("link", ""))
-        if not official or official in seen:
+
+        title = normalize_text(row.get("title", ""))
+        if not title:
             continue
-        seen.add(official)
+
+        region_main = normalize_text(row.get("region_main", ""))
+        region_sub = normalize_text(row.get("region_sub", ""))
+        key = (title, region_main, region_sub)
+        discovered_urls = collect_institution_urls(row)
+        if not discovered_urls:
+            continue
+
+        entry = merged.get(key)
+        if entry is None:
+            merged[key] = {
+                "title": title,
+                "category": normalize_text(row.get("category", "")),
+                "region_main": region_main,
+                "region_sub": region_sub,
+                "source_query": normalize_text(row.get("source_query", "")),
+                "official_urls": list(discovered_urls),
+                "seen_urls": set(discovered_urls),
+            }
+            continue
+
+        seen_urls = entry.get("seen_urls")
+        known: set[str] = seen_urls if isinstance(seen_urls, set) else set()
+        official_urls = entry.get("official_urls")
+        url_list: list[str] = official_urls if isinstance(official_urls, list) else []
+
+        for url in discovered_urls:
+            if url in known:
+                continue
+            known.add(url)
+            url_list.append(url)
+
+        entry["official_urls"] = url_list
+        entry["seen_urls"] = known
+
+    institutions: list[Institution] = []
+    for _, item in merged.items():
+        official_urls_obj = item.get("official_urls")
+        official_urls = official_urls_obj if isinstance(official_urls_obj, list) else []
+        if not official_urls:
+            continue
+
         institutions.append(
             Institution(
                 institution_id=f"inst-{len(institutions) + 1:05d}",
-                title=normalize_text(row.get("title", "")),
-                category=normalize_text(row.get("category", "")),
-                official_url=official,
-                region_main=normalize_text(row.get("region_main", "")),
-                region_sub=normalize_text(row.get("region_sub", "")),
-                source_query=normalize_text(row.get("source_query", "")),
+                title=str(item.get("title", "")),
+                category=str(item.get("category", "")),
+                official_url=official_urls[0],
+                official_urls=official_urls,
+                region_main=str(item.get("region_main", "")),
+                region_sub=str(item.get("region_sub", "")),
+                source_query=str(item.get("source_query", "")),
             )
         )
 
@@ -426,6 +543,30 @@ def http_get(url: str, timeout: int) -> str:
                 time.sleep(0.25 * attempt)
 
     raise RuntimeError(f"HTTP request failed after retries: {last_error}")
+
+
+def render_page_with_playwright(url: str, timeout_ms: int) -> str:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return ""
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(ignore_https_errors=True)
+        page = context.new_page()
+
+        page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        try:
+            page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 8000))
+        except Exception:
+            # Some pages never reach network idle; keep best-effort content.
+            pass
+
+        content = page.content()
+        context.close()
+        browser.close()
+        return content
 
 
 def extract_links(html: str, base_url: str) -> list[str]:
@@ -477,11 +618,11 @@ def extract_sitemap_links(
 
 def discover_pages(
     institution: Institution,
+    base_url: str,
     max_pages: int,
     timeout: int,
     failures: list[FailureRecord],
 ) -> list[str]:
-    base_url = institution.official_url
     pages: list[str] = [base_url]
 
     try:
@@ -520,6 +661,65 @@ def clean_lines_from_html(html_text: str) -> list[str]:
     merged = "\n".join(parser.lines)
     lines = [normalize_text(line) for line in merged.split("\n")]
     return [line for line in lines if line]
+
+
+def extract_image_candidates(html_text: str, page_url: str) -> list[dict[str, str]]:
+    parser = ImageExtractor()
+    parser.feed(html_text)
+
+    candidates: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for image in parser.images:
+        full = urllib.parse.urljoin(page_url, image.get("src", ""))
+        if not full.startswith(("http://", "https://")):
+            continue
+
+        low = full.lower()
+        meta = normalize_text(" ".join([image.get("alt", ""), image.get("title", ""), low]))
+        if not IMAGE_EXT_PATTERN.search(low) and "image" not in low:
+            continue
+        if "logo" in meta or "icon" in meta or "banner" in meta:
+            continue
+
+        normalized = urllib.parse.urlunparse(urllib.parse.urlparse(full))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        candidates.append(
+            {
+                "url": normalized,
+                "alt": image.get("alt", ""),
+                "title": image.get("title", ""),
+            }
+        )
+
+    return candidates
+
+
+def extract_ocr_text_from_image(image_url: str, timeout: int) -> str:
+    try:
+        import io
+        from PIL import Image
+        import pytesseract
+    except ImportError:
+        return ""
+
+    req = urllib.request.Request(
+        image_url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; ExhibitionDataHub/1.0)",
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        },
+    )
+
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = resp.read()
+
+    if not data:
+        return ""
+
+    img = Image.open(io.BytesIO(data))
+    return normalize_text(pytesseract.image_to_string(img, lang="kor+eng"))
 
 
 def normalize_date_text(value: str, reference_year: int | None = None) -> str:
@@ -579,6 +779,7 @@ def parse_jsonld_events(html_text: str) -> list[dict[str, str]]:
             node_type = str(node.get("@type", "")).lower()
             if node_type == "event":
                 name = normalize_text(str(node.get("name", "")))
+                description = normalize_text(str(node.get("description", "")))
                 start_raw = str(node.get("startDate", ""))
                 end_raw = str(node.get("endDate", ""))
                 start_date = normalize_date_text(start_raw[:10]) if start_raw else ""
@@ -596,6 +797,7 @@ def parse_jsonld_events(html_text: str) -> list[dict[str, str]]:
                 events.append(
                     {
                         "event_name": name,
+                        "description": description,
                         "start_date": start_date,
                         "end_date": end_date,
                         "price_type": price_type,
@@ -672,6 +874,7 @@ def parse_text_events(lines: list[str], keyword_hints: list[str]) -> list[dict[s
         events.append(
             {
                 "event_name": line,
+                "description": context[:300],
                 "start_date": start_date,
                 "end_date": end_date,
                 "price_type": price_type,
@@ -699,6 +902,10 @@ def extract_events_from_page(
     timeout: int,
     keyword_hints: list[str],
     failures: list[FailureRecord],
+    enable_js_render: bool,
+    js_render_timeout_ms: int,
+    enable_image_ocr: bool,
+    max_images_per_page: int,
 ) -> list[dict[str, str]]:
     low = page_url.lower()
     if any(skip in low for skip in SKIP_PAGE_URL_KEYWORDS):
@@ -715,10 +922,65 @@ def extract_events_from_page(
         return events
 
     lines = clean_lines_from_html(html_text)
-    if not lines:
+    if lines:
+        text_events = parse_text_events(lines, keyword_hints)
+        if text_events:
+            return text_events
+
+    render_html = ""
+    if enable_js_render:
+        try:
+            render_html = render_page_with_playwright(page_url, max(1000, js_render_timeout_ms))
+        except Exception as exc:  # noqa: BLE001
+            add_failure(failures, institution, page_url, "js-render", exc)
+            render_html = ""
+
+    effective_html = render_html if render_html else html_text
+
+    if render_html:
+        events = parse_jsonld_events(render_html)
+        if events:
+            return events
+
+        lines = clean_lines_from_html(render_html)
+        if lines:
+            text_events = parse_text_events(lines, keyword_hints)
+            if text_events:
+                return text_events
+
+    if not enable_image_ocr:
         return []
 
-    return parse_text_events(lines, keyword_hints)
+    images = extract_image_candidates(effective_html, page_url)
+    if not images:
+        return []
+
+    ocr_events: list[dict[str, str]] = []
+    for image in images[: max(0, max_images_per_page)]:
+        image_url = image.get("url", "")
+        if not image_url:
+            continue
+
+        try:
+            ocr_text = extract_ocr_text_from_image(image_url, timeout)
+        except (HTTPError, URLError, TimeoutError, ValueError, RuntimeError, OSError) as exc:
+            add_failure(failures, institution, image_url, "ocr-image", exc)
+            continue
+
+        if not ocr_text:
+            continue
+
+        ocr_lines = [line for line in re.split(r"[|\\n]+", ocr_text) if normalize_text(line)]
+        parsed = parse_text_events(ocr_lines, keyword_hints)
+        for event in parsed:
+            raw_conf = float(event.get("confidence", "0") or 0)
+            lowered = max(0.50, raw_conf - 0.12)
+            event["confidence"] = f"{lowered:.2f}"
+            event["description"] = event.get("description", "") or ocr_text[:300]
+            event["evidence"] = f"ocr:{image_url} | {event.get('evidence', '')}"[:300]
+            ocr_events.append(event)
+
+    return ocr_events
 
 
 def consolidate_events(rows: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -764,6 +1026,64 @@ def write_csv(path: Path, rows: list[dict[str, str]], fieldnames: list[str]) -> 
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def build_curated_events(
+    event_rows: list[dict[str, str]],
+    min_confidence: float,
+) -> list[dict[str, str]]:
+    dedup_events = consolidate_events(event_rows)
+    return [
+        row
+        for row in dedup_events
+        if float(row.get("confidence", "0") or 0) >= min_confidence
+    ]
+
+
+def save_progress(
+    output_csv: Path,
+    failed_domains_out: Path,
+    event_rows: list[dict[str, str]],
+    failures: list[FailureRecord],
+    min_confidence: float,
+) -> tuple[int, int]:
+    curated_events = build_curated_events(event_rows, min_confidence)
+    write_csv(
+        output_csv,
+        curated_events,
+        [
+            "institution_id",
+            "institution_title",
+            "institution_url",
+            "source_page_url",
+            "source_page_count",
+            "source_page_urls",
+            "event_name",
+            "description",
+            "start_date",
+            "end_date",
+            "price_type",
+            "price_text",
+            "confidence",
+            "evidence",
+        ],
+    )
+
+    failed_domain_rows = summarize_failures(failures)
+    write_csv(
+        failed_domains_out,
+        failed_domain_rows,
+        [
+            "domain",
+            "fail_count",
+            "stages",
+            "error_types",
+            "last_institution",
+            "sample_url",
+            "sample_message",
+        ],
+    )
+    return len(curated_events), len(failed_domain_rows)
 
 
 def summarize_failures(failures: list[FailureRecord]) -> list[dict[str, str]]:
@@ -827,70 +1147,107 @@ def run_pipeline(args: argparse.Namespace) -> None:
     failures: list[FailureRecord] = []
     print(f"Loaded {len(institutions)} candidate institutions")
 
-    for idx, inst in enumerate(institutions, start=1):
-        pages = discover_pages(inst, args.max_pages_per_institution, args.timeout, failures)
-        print(f"[{idx}/{len(institutions)}] {inst.title}: {len(pages)} candidate pages")
+    checkpoint_step = max(0, args.save_every)
+    interrupted = False
 
-        for page in pages:
-            events = extract_events_from_page(inst, page, args.timeout, keyword_hints, failures)
-            for event in events:
-                row = {
-                    "institution_id": inst.institution_id,
-                    "institution_title": inst.title,
-                    "institution_url": inst.official_url,
-                    "source_page_url": page,
-                    "event_name": event.get("event_name", ""),
-                    "start_date": event.get("start_date", ""),
-                    "end_date": event.get("end_date", ""),
-                    "price_type": event.get("price_type", "unknown"),
-                    "price_text": event.get("price_text", ""),
-                    "confidence": event.get("confidence", "0.00"),
-                    "evidence": event.get("evidence", "")[:500],
-                }
-                event_rows.append(row)
+    def maybe_checkpoint(processed_count: int, force: bool = False) -> None:
+        if not force:
+            if checkpoint_step <= 0:
+                return
+            if processed_count <= 0 or processed_count % checkpoint_step != 0:
+                return
 
-            time.sleep(args.pause)
+        saved_rows, saved_failed = save_progress(
+            output_csv,
+            failed_domains_out,
+            event_rows,
+            failures,
+            args.min_confidence,
+        )
+        phase = "final" if force else f"checkpoint @ {processed_count}"
+        print(
+            f"[SAVE] {phase}: {saved_rows} exhibition rows, {saved_failed} failed domains"
+        )
 
-    dedup_events = consolidate_events(event_rows)
-    curated_events = [row for row in dedup_events if float(row.get("confidence", "0") or 0) >= args.min_confidence]
+    try:
+        for idx, inst in enumerate(institutions, start=1):
+            cap_base_urls = max(0, args.max_base_urls_per_institution)
+            base_urls = inst.official_urls
+            if cap_base_urls > 0:
+                base_urls = base_urls[:cap_base_urls]
 
-    write_csv(
-        output_csv,
-        curated_events,
-        [
-            "institution_id",
-            "institution_title",
-            "institution_url",
-            "source_page_url",
-            "source_page_count",
-            "source_page_urls",
-            "event_name",
-            "start_date",
-            "end_date",
-            "price_type",
-            "price_text",
-            "confidence",
-            "evidence",
-        ],
-    )
+            pages: list[str] = []
+            seen_pages: set[str] = set()
+            for base_url in base_urls:
+                discovered = discover_pages(
+                    inst,
+                    base_url,
+                    args.max_pages_per_institution,
+                    args.timeout,
+                    failures,
+                )
+                for page in discovered:
+                    if page in seen_pages:
+                        continue
+                    seen_pages.add(page)
+                    pages.append(page)
+                    if len(pages) >= args.max_pages_per_institution:
+                        break
+                if len(pages) >= args.max_pages_per_institution:
+                    break
 
-    print(f"Saved {len(curated_events)} exhibition rows -> {output_csv}")
+            print(
+                f"[{idx}/{len(institutions)}] {inst.title}: "
+                f"{len(pages)} candidate pages from {len(base_urls)} base urls"
+            )
 
-    failed_domain_rows = summarize_failures(failures)
-    write_csv(
-        failed_domains_out,
-        failed_domain_rows,
-        [
-            "domain",
-            "fail_count",
-            "stages",
-            "error_types",
-            "last_institution",
-            "sample_url",
-            "sample_message",
-        ],
-    )
-    print(f"Saved {len(failed_domain_rows)} failed domains -> {failed_domains_out}")
+            for page in pages:
+                events = extract_events_from_page(
+                    inst,
+                    page,
+                    args.timeout,
+                    keyword_hints,
+                    failures,
+                    args.enable_js_render,
+                    args.js_render_timeout_ms,
+                    args.enable_image_ocr,
+                    args.max_images_per_page,
+                )
+                for event in events:
+                    row = {
+                        "institution_id": inst.institution_id,
+                        "institution_title": inst.title,
+                        "institution_url": inst.official_url,
+                        "source_page_url": page,
+                        "event_name": event.get("event_name", ""),
+                        "description": event.get("description", ""),
+                        "start_date": event.get("start_date", ""),
+                        "end_date": event.get("end_date", ""),
+                        "price_type": event.get("price_type", "unknown"),
+                        "price_text": event.get("price_text", ""),
+                        "confidence": event.get("confidence", "0.00"),
+                        "evidence": event.get("evidence", "")[:500],
+                    }
+                    event_rows.append(row)
+
+                time.sleep(args.pause)
+
+            maybe_checkpoint(idx)
+    except KeyboardInterrupt:
+        interrupted = True
+        print("[WARN] Interrupted by user. Saving partial results...")
+    finally:
+        saved_rows, saved_failed = save_progress(
+            output_csv,
+            failed_domains_out,
+            event_rows,
+            failures,
+            args.min_confidence,
+        )
+        print(f"Saved {saved_rows} exhibition rows -> {output_csv}")
+        print(f"Saved {saved_failed} failed domains -> {failed_domains_out}")
+        if interrupted:
+            print("[SAVE] Partial results were saved after interruption.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -911,6 +1268,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max candidate pages per institution",
     )
     parser.add_argument(
+        "--enable-js-render",
+        action="store_true",
+        help="Enable Playwright-based JavaScript rendering when static HTML extraction finds no events",
+    )
+    parser.add_argument(
+        "--js-render-timeout-ms",
+        type=int,
+        default=DEFAULT_JS_RENDER_TIMEOUT_MS,
+        help="Timeout in milliseconds for JS rendering page load",
+    )
+    parser.add_argument(
+        "--enable-image-ocr",
+        action="store_true",
+        help="Enable OCR on discovered images when text/JSON-LD extraction finds no events",
+    )
+    parser.add_argument(
+        "--max-images-per-page",
+        type=int,
+        default=DEFAULT_MAX_IMAGES_PER_PAGE,
+        help="Max images to OCR per page when --enable-image-ocr is enabled",
+    )
+    parser.add_argument(
+        "--max-base-urls-per-institution",
+        type=int,
+        default=DEFAULT_MAX_BASE_URLS_PER_INSTITUTION,
+        help="Max homepage URLs to try per institution. 0 means no limit.",
+    )
+    parser.add_argument(
         "--max-institutions",
         type=int,
         default=DEFAULT_MAX_INSTITUTIONS,
@@ -921,6 +1306,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_MIN_CONFIDENCE,
         help="Minimum confidence threshold for output",
+    )
+    parser.add_argument(
+        "--save-every",
+        type=int,
+        default=DEFAULT_SAVE_EVERY,
+        help="Save checkpoint every N institutions. 0 disables periodic checkpointing.",
     )
     return parser
 
