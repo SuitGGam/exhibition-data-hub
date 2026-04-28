@@ -11,6 +11,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import date
+from http.client import IncompleteRead
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -28,6 +29,33 @@ DEFAULT_MAX_INSTITUTIONS = 0
 DEFAULT_MIN_CONFIDENCE = 0.75
 DEFAULT_SAVE_EVERY = 25
 DEFAULT_JS_RENDER_TIMEOUT_MS = 12000
+
+EXHIBITION_OUTPUT_FIELDNAMES = [
+    "institution_id",
+    "institution_title",
+    "institution_url",
+    "source_page_url",
+    "source_page_count",
+    "source_page_urls",
+    "event_name",
+    "description",
+    "start_date",
+    "end_date",
+    "price_type",
+    "price_text",
+    "confidence",
+    "evidence",
+]
+
+FAILED_DOMAIN_FIELDNAMES = [
+    "domain",
+    "fail_count",
+    "stages",
+    "error_types",
+    "last_institution",
+    "sample_url",
+    "sample_message",
+]
 
 URL_SOURCE_FIELDS = [
     "official_url",
@@ -617,7 +645,7 @@ def http_get(url: str, timeout: int) -> str:
         except HTTPError:
             # HTTP status errors are not typically recoverable by retry.
             raise
-        except (URLError, TimeoutError, ConnectionResetError, OSError) as exc:
+        except (URLError, TimeoutError, ConnectionResetError, OSError, IncompleteRead) as exc:
             last_error = exc
             if attempt < DEFAULT_HTTP_RETRY_COUNT:
                 time.sleep(0.25 * attempt)
@@ -1293,6 +1321,51 @@ def write_csv(path: Path, rows: list[dict[str, str]], fieldnames: list[str]) -> 
         writer.writerows(rows)
 
 
+def read_csv_rows(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+
+    with path.open(encoding="utf-8-sig", newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def load_existing_event_rows(path: Path) -> list[dict[str, str]]:
+    return read_csv_rows(path)
+
+
+def load_existing_failures(path: Path) -> list[FailureRecord]:
+    failures: list[FailureRecord] = []
+    for row in read_csv_rows(path):
+        try:
+            fail_count = max(1, int(row.get("fail_count", "1") or 1))
+        except ValueError:
+            fail_count = 1
+
+        stages = [item.strip() for item in str(row.get("stages", "")).split(",") if item.strip()]
+        error_types = [item.strip() for item in str(row.get("error_types", "")).split(",") if item.strip()]
+        stage = stages[0] if stages else "previous-run"
+        error_type = error_types[0] if error_types else "PreviousRun"
+        domain = str(row.get("domain", "")).strip() or "(unknown)"
+        institution_title = str(row.get("last_institution", "")).strip() or "(previous-run)"
+        url = str(row.get("sample_url", "")).strip()
+        message = str(row.get("sample_message", "")).strip() or "loaded from previous summary"
+
+        for _ in range(fail_count):
+            failures.append(
+                FailureRecord(
+                    institution_id="previous-run",
+                    institution_title=institution_title,
+                    domain=domain,
+                    url=url,
+                    stage=stage,
+                    error_type=error_type,
+                    error_message=message,
+                )
+            )
+
+    return failures
+
+
 def build_curated_events(
     event_rows: list[dict[str, str]],
     min_confidence: float,
@@ -1316,37 +1389,14 @@ def save_progress(
     write_csv(
         output_csv,
         curated_events,
-        [
-            "institution_id",
-            "institution_title",
-            "institution_url",
-            "source_page_url",
-            "source_page_count",
-            "source_page_urls",
-            "event_name",
-            "description",
-            "start_date",
-            "end_date",
-            "price_type",
-            "price_text",
-            "confidence",
-            "evidence",
-        ],
+        EXHIBITION_OUTPUT_FIELDNAMES,
     )
 
     failed_domain_rows = summarize_failures(failures)
     write_csv(
         failed_domains_out,
         failed_domain_rows,
-        [
-            "domain",
-            "fail_count",
-            "stages",
-            "error_types",
-            "last_institution",
-            "sample_url",
-            "sample_message",
-        ],
+        FAILED_DOMAIN_FIELDNAMES,
     )
     return len(curated_events), len(failed_domain_rows)
 
@@ -1408,8 +1458,28 @@ def run_pipeline(args: argparse.Namespace) -> None:
     if args.max_institutions > 0:
         institutions = institutions[:args.max_institutions]
 
+    start_index = max(1, args.start_index)
+    if start_index > len(institutions):
+        print(
+            f"[WARN] start-index {start_index} is beyond the available institution count ({len(institutions)})."
+        )
+        institutions = []
+    else:
+        institutions = institutions[start_index - 1 :]
+
     event_rows: list[dict[str, str]] = []
     failures: list[FailureRecord] = []
+    if start_index > 1:
+        previous_events = load_existing_event_rows(output_csv)
+        if previous_events:
+            event_rows.extend(previous_events)
+            print(f"[RESUME] Loaded {len(previous_events)} existing exhibition rows from {output_csv}")
+
+        previous_failures = load_existing_failures(failed_domains_out)
+        if previous_failures:
+            failures.extend(previous_failures)
+            print(f"[RESUME] Loaded {len(previous_failures)} existing failure records from {failed_domains_out}")
+
     print(f"Loaded {len(institutions)} candidate institutions")
 
     checkpoint_step = max(0, args.save_every)
@@ -1577,6 +1647,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_SAVE_EVERY,
         help="Save checkpoint every N institutions. 0 disables periodic checkpointing.",
+    )
+    parser.add_argument(
+        "--start-index",
+        type=int,
+        default=1,
+        help="1-based institution index to start from. Use this to resume from a later point.",
     )
     return parser
 
