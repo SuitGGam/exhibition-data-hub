@@ -1,3 +1,4 @@
+import argparse
 import csv
 import html
 import json
@@ -9,6 +10,7 @@ import urllib.parse
 import urllib.request
 from urllib.error import HTTPError, URLError
 from pathlib import Path
+from typing import Iterable
 
 
 NAVER_LOCAL_API_URL = "https://openapi.naver.com/v1/search/local.json"
@@ -21,6 +23,28 @@ LOCAL_SEARCH_MAX_DISPLAY = 5
 LOCAL_SEARCH_ALLOWED_SORT = {"random", "comment"}
 DEFAULT_LOCAL_DISPLAY = 5
 DEFAULT_LOCAL_SORT = "random"
+DEFAULT_BATCH_SIZE = 25000
+DEFAULT_PROGRESS_PATH = "data/naver_local_progress.json"
+
+CSV_FIELDNAMES = [
+    "title",
+    "link",
+    "start_date",
+    "end_date",
+    "full_address",
+    "road_address",
+    "region_main",
+    "region_sub",
+    "region_detail",
+    "official_url",
+    "summary",
+    "tel",
+    "category",
+    "price",
+    "mapx",
+    "mapy",
+    "source_query",
+]
 
 
 def load_env_from_dotenv(dotenv_path: Path) -> None:
@@ -148,35 +172,74 @@ def search_local(
 
 def write_csv(rows: list[dict], output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = [
-        "title",
-        "link",
-        "start_date",
-        "end_date",
-        "full_address",
-        "road_address",
-        "region_main",
-        "region_sub",
-        "region_detail",
-        "official_url",
-        "summary",
-        "tel",
-        "category",
-        "price",
-        "mapx",
-        "mapy",
-        "source_query",
-    ]
-
     with output_path.open("w", encoding="utf-8-sig", newline="") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        writer = csv.DictWriter(csv_file, fieldnames=CSV_FIELDNAMES)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def read_csv_rows(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    with path.open(encoding="utf-8-sig", newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def append_csv_rows(rows: Iterable[dict], output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    file_exists = output_path.exists() and output_path.stat().st_size > 0
+    mode = "a" if file_exists else "w"
+    with output_path.open(mode, encoding="utf-8-sig", newline="") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=CSV_FIELDNAMES)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerows(rows)
+
+
+def load_progress(progress_path: Path) -> dict:
+    if not progress_path.exists():
+        return {}
+    try:
+        return json.loads(progress_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def save_progress(
+    progress_path: Path,
+    last_processed_index: int,
+    next_start_index: int,
+    total_queries: int,
+    appended_rows: int,
+) -> None:
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "last_processed_index": last_processed_index,
+        "next_start_index": next_start_index,
+        "total_queries": total_queries,
+        "appended_rows": appended_rows,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    progress_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def main() -> int:
     project_root = Path(__file__).resolve().parent.parent
     load_env_from_dotenv(project_root / ".env")
+    parser = argparse.ArgumentParser(description="Search Naver Local for exhibitions (supports resume by index)")
+    parser.add_argument("--start-index", type=int, default=1, help="1-based start index within the region×keyword combinations")
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Number of combinations to process in this run")
+    parser.add_argument(
+        "--progress-file",
+        default=DEFAULT_PROGRESS_PATH,
+        help="Progress JSON path used for automatic resume",
+    )
+    parser.add_argument(
+        "--no-auto-resume",
+        action="store_true",
+        help="Disable automatic resume from progress file",
+    )
+    args = parser.parse_args()
 
     client_id = os.getenv("NAVER_CLIENT_ID")
     client_secret = os.getenv("NAVER_CLIENT_SECRET")
@@ -195,15 +258,50 @@ def main() -> int:
 
     local_display = DEFAULT_LOCAL_DISPLAY
     local_sort = os.getenv("NAVER_LOCAL_SORT", DEFAULT_LOCAL_SORT)
+    progress_path = project_root / args.progress_file
 
-    rows = []
+    # Load existing rows to avoid duplicates when appending
+    output_path = project_root / "data" / "naver_local_exhibitions.csv"
+    existing = read_csv_rows(output_path)
     seen = set()
+    if existing:
+        for er in existing:
+            dedupe_key = (er.get("title", ""), er.get("full_address", ""), er.get("official_url", ""))
+            seen.add(dedupe_key)
+
     total_queries = len(regions) * len(keywords)
+
+    start_index = max(1, args.start_index)
+    progress = load_progress(progress_path)
+    progress_next_start = int(progress.get("next_start_index", 1) or 1)
+    if not args.no_auto_resume and args.start_index == 1 and progress_next_start > 1:
+        start_index = progress_next_start
+
+    batch_size = max(1, args.batch_size)
+    end_index = min(total_queries, start_index + batch_size - 1)
+
+    if start_index > total_queries:
+        print(f"start-index {start_index} is beyond total combinations ({total_queries}). Nothing to do.")
+        return 0
+
+    new_rows: list[dict] = []
     query_index = 0
+    processed = 0
+    last_processed_index = start_index - 1
+
+    print(
+        f"Running combinations {start_index}..{end_index} / {total_queries} "
+        f"(auto-resume={'off' if args.no_auto_resume else 'on'})"
+    )
 
     for region in regions:
         for keyword in keywords:
             query_index += 1
+            if query_index < start_index:
+                continue
+            if query_index > end_index:
+                break
+
             query = f"{region} {keyword}"
             print(f"[{query_index}/{total_queries}] Searching: {query}")
             try:
@@ -216,46 +314,66 @@ def main() -> int:
                 )
             except Exception as exc:  # noqa: BLE001
                 print(f"[WARN] {query}: {exc}", file=sys.stderr)
-                continue
+            else:
+                for item in items:
+                    address = item.get("address", "")
+                    road_address = item.get("roadAddress", "")
+                    region_main, region_sub, region_detail = parse_address_parts(address)
+                    mapx = item.get("mapx")
+                    mapy = item.get("mapy")
+                    row = {
+                        "title": clean_text(item.get("title", "")),
+                        "link": item.get("link", ""),
+                        "start_date": "",
+                        "end_date": "",
+                        "full_address": address,
+                        "road_address": road_address,
+                        "region_main": region_main,
+                        "region_sub": region_sub,
+                        "region_detail": region_detail,
+                        "official_url": item.get("link", ""),
+                        "summary": clean_text(item.get("description", "")),
+                        "tel": item.get("telephone", ""),
+                        "category": item.get("category", ""),
+                        "price": "unknown",
+                        "mapx": mapx if mapx else "",
+                        "mapy": mapy if mapy else "",
+                        "source_query": query,
+                    }
+                    # Prevent duplicate rows caused by overlapping keywords or previous runs.
+                    dedupe_key = (row["title"], row["full_address"], row["official_url"])
+                    if dedupe_key in seen:
+                        continue
+                    seen.add(dedupe_key)
+                    new_rows.append(row)
+            finally:
+                # Mark this query index as processed even if request failed, then resume after it.
+                last_processed_index = query_index
+                processed += 1
+                save_progress(
+                    progress_path,
+                    last_processed_index=last_processed_index,
+                    next_start_index=min(total_queries + 1, last_processed_index + 1),
+                    total_queries=total_queries,
+                    appended_rows=len(new_rows),
+                )
+                # Prevent request bursts that can trigger API throttling.
+                time.sleep(REQUEST_PAUSE_SECONDS)
+        # break outer if we've passed the end index
+        if query_index >= end_index:
+            break
 
-            for item in items:
-                address = item.get("address", "")
-                road_address = item.get("roadAddress", "")
-                region_main, region_sub, region_detail = parse_address_parts(address)
-                mapx = item.get("mapx")
-                mapy = item.get("mapy")
-                row = {
-                    "title": clean_text(item.get("title", "")),
-                    "link": item.get("link", ""),
-                    "start_date": "",
-                    "end_date": "",
-                    "full_address": address,
-                    "road_address": road_address,
-                    "region_main": region_main,
-                    "region_sub": region_sub,
-                    "region_detail": region_detail,
-                    "official_url": item.get("link", ""),
-                    "summary": clean_text(item.get("description", "")),
-                    "tel": item.get("telephone", ""),
-                    "category": item.get("category", ""),
-                    "price": "unknown",
-                    "mapx": mapx if mapx else "",
-                    "mapy": mapy if mapy else "",
-                    "source_query": query,
-                }
-                # Prevent duplicate rows caused by overlapping keywords.
-                dedupe_key = (row["title"], row["full_address"], row["official_url"])
-                if dedupe_key in seen:
-                    continue
-                seen.add(dedupe_key)
-                rows.append(row)
-
-            # Prevent request bursts that can trigger API throttling.
-            time.sleep(REQUEST_PAUSE_SECONDS)
-
-    output_path = project_root / "data" / "naver_local_exhibitions.csv"
-    write_csv(rows, output_path)
-    print(f"Saved {len(rows)} rows to {output_path}")
+    if new_rows:
+        append_csv_rows(new_rows, output_path)
+    save_progress(
+        progress_path,
+        last_processed_index=last_processed_index,
+        next_start_index=min(total_queries + 1, last_processed_index + 1),
+        total_queries=total_queries,
+        appended_rows=len(new_rows),
+    )
+    print(f"Appended {len(new_rows)} new rows to {output_path} (processed {processed} queries from {start_index} to {end_index})")
+    print(f"Progress saved to {progress_path} (next start index: {min(total_queries + 1, last_processed_index + 1)})")
     return 0
 
 
