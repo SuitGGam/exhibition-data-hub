@@ -1536,6 +1536,40 @@ def run_pipeline(args: argparse.Namespace) -> None:
                 f"{len(pages)} candidate pages from {len(base_urls)} base urls"
             )
 
+            # If Instagram handling is enabled, process instagram base URLs with Playwright extractor
+            if args.enable_instagram:
+                for base_url in base_urls:
+                    if "instagram.com" in base_url.lower():
+                        try:
+                            try:
+                                from src.collect_instagram import extract_events_from_instagram
+                            except Exception:
+                                from collect_instagram import extract_events_from_instagram
+
+                            ig_events = extract_events_from_instagram(inst, base_url, args, failures)
+                            for event in ig_events:
+                                source_page = event.get("evidence", "")
+                                if source_page.startswith("instagram:"):
+                                    source_page = source_page.split("instagram:", 1)[-1]
+
+                                row = {
+                                    "institution_id": inst.institution_id,
+                                    "institution_title": inst.title,
+                                    "institution_url": inst.official_url,
+                                    "source_page_url": source_page or base_url,
+                                    "event_name": event.get("event_name", ""),
+                                    "description": event.get("description", ""),
+                                    "start_date": event.get("start_date", ""),
+                                    "end_date": event.get("end_date", ""),
+                                    "price_type": event.get("price_type", "unknown"),
+                                    "price_text": event.get("price_text", ""),
+                                    "confidence": event.get("confidence", "0.00"),
+                                    "evidence": event.get("evidence", "")[:500],
+                                }
+                                event_rows.append(row)
+                        except Exception as exc:  # noqa: BLE001
+                            add_failure(failures, inst, base_url, "instagram-invoke", exc)
+
             for page in pages:
                 events = extract_events_from_page(
                     inst,
@@ -1617,6 +1651,62 @@ def build_parser() -> argparse.ArgumentParser:
         "--enable-image-ocr",
         action="store_true",
         help="Enable OCR on discovered images when text/JSON-LD extraction finds no events",
+    )
+    parser.add_argument(
+        "--enable-instagram",
+        action="store_true",
+        help="Enable Instagram profile/post extraction for rows that include instagram_url",
+    )
+    parser.add_argument(
+        "--instagram-max-posts",
+        type=int,
+        default=int(os.getenv("INSTAGRAM_MAX_POSTS", "20") or 20),
+        help="Max Instagram posts to inspect per profile",
+    )
+    parser.add_argument(
+        "--instagram-post-delay",
+        type=float,
+        default=float(os.getenv("INSTAGRAM_POST_DELAY", "4.0") or 4.0),
+        help="Delay in seconds between Instagram post requests",
+    )
+    parser.add_argument(
+        "--instagram-profile-delay",
+        type=float,
+        default=float(os.getenv("INSTAGRAM_PROFILE_DELAY", "8.0") or 8.0),
+        help="Delay in seconds before starting Instagram profile extraction",
+    )
+    parser.add_argument(
+        "--instagram-random-delay-min",
+        type=float,
+        default=float(os.getenv("INSTAGRAM_RANDOM_DELAY_MIN", "10.0") or 10.0),
+        help="Minimum random delay in seconds for Instagram requests",
+    )
+    parser.add_argument(
+        "--instagram-random-delay-max",
+        type=float,
+        default=float(os.getenv("INSTAGRAM_RANDOM_DELAY_MAX", "30.0") or 30.0),
+        help="Maximum random delay in seconds for Instagram requests",
+    )
+    parser.add_argument(
+        "--instagram-timeout-ms",
+        type=int,
+        default=int(os.getenv("INSTAGRAM_TIMEOUT_MS", "10000") or 10000),
+        help="Playwright timeout in milliseconds for Instagram page loads",
+    )
+    parser.add_argument(
+        "--instagram-proxy",
+        default=os.getenv("INSTAGRAM_PROXY", ""),
+        help="Optional proxy URL for Instagram scraping, e.g. http://host:port",
+    )
+    parser.add_argument(
+        "--instagram-username",
+        default=os.getenv("INSTAGRAM_USER", ""),
+        help="Optional Instagram username for login-based scraping",
+    )
+    parser.add_argument(
+        "--instagram-password",
+        default=os.getenv("INSTAGRAM_PASS", ""),
+        help="Optional Instagram password for login-based scraping",
     )
     parser.add_argument(
         "--max-images-per-page",
