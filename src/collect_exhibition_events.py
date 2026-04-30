@@ -29,6 +29,7 @@ DEFAULT_MAX_INSTITUTIONS = 0
 DEFAULT_MIN_CONFIDENCE = 0.75
 DEFAULT_SAVE_EVERY = 25
 DEFAULT_JS_RENDER_TIMEOUT_MS = 12000
+DEFAULT_PROGRESS_PATH = "data/exhibition_extraction_progress.json"
 
 EXHIBITION_OUTPUT_FIELDNAMES = [
     "institution_id",
@@ -1401,6 +1402,35 @@ def save_progress(
     return len(curated_events), len(failed_domain_rows)
 
 
+def load_run_progress(progress_path: Path) -> dict:
+    if not progress_path.exists():
+        return {}
+    try:
+        return json.loads(progress_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def save_run_progress(
+    progress_path: Path,
+    last_processed_index: int,
+    next_start_index: int,
+    total_institutions: int,
+    saved_rows: int,
+    saved_failed: int,
+) -> None:
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "last_processed_index": last_processed_index,
+        "next_start_index": next_start_index,
+        "total_institutions": total_institutions,
+        "saved_rows": saved_rows,
+        "saved_failed": saved_failed,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    progress_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def summarize_failures(failures: list[FailureRecord]) -> list[dict[str, str]]:
     by_domain: dict[str, dict[str, object]] = {}
     for item in failures:
@@ -1452,20 +1482,32 @@ def run_pipeline(args: argparse.Namespace) -> None:
     input_csv = root / args.input
     output_csv = root / args.output
     failed_domains_out = root / args.failed_domains_out
+    progress_path = root / args.progress_file
     keyword_hints = load_markdown_bullets(root / "docs" / "keywords.md")
 
-    institutions = load_institutions(input_csv, keyword_hints)
+    all_institutions = load_institutions(input_csv, keyword_hints)
     if args.max_institutions > 0:
-        institutions = institutions[:args.max_institutions]
+        all_institutions = all_institutions[:args.max_institutions]
+    total_institutions = len(all_institutions)
 
     start_index = max(1, args.start_index)
-    if start_index > len(institutions):
+    progress = load_run_progress(progress_path)
+    progress_next_start = int(progress.get("next_start_index", 1) or 1)
+    if not args.no_auto_resume and args.start_index == 1 and progress_next_start > 1:
+        start_index = progress_next_start
+
+    end_index = int(args.end_index) if args.end_index > 0 else total_institutions
+    if start_index > end_index:
+        print(f"[WARN] start-index {start_index} is greater than end-index {end_index}. Nothing to do.")
+        return
+
+    if start_index > total_institutions:
         print(
-            f"[WARN] start-index {start_index} is beyond the available institution count ({len(institutions)})."
+            f"[WARN] start-index {start_index} is beyond the available institution count ({total_institutions})."
         )
         institutions = []
     else:
-        institutions = institutions[start_index - 1 :]
+        institutions = all_institutions[start_index - 1 : end_index]
 
     event_rows: list[dict[str, str]] = []
     failures: list[FailureRecord] = []
@@ -1481,9 +1523,13 @@ def run_pipeline(args: argparse.Namespace) -> None:
             print(f"[RESUME] Loaded {len(previous_failures)} existing failure records from {failed_domains_out}")
 
     print(f"Loaded {len(institutions)} candidate institutions")
+    print(f"Progress file: {progress_path}")
+    if start_index > 1 or end_index < total_institutions:
+        print(f"Processing range: [{start_index}, {end_index}] / {total_institutions} total")
 
     checkpoint_step = max(0, args.save_every)
     interrupted = False
+    last_processed_index = start_index - 1
 
     def maybe_checkpoint(processed_count: int, force: bool = False) -> None:
         if not force:
@@ -1499,6 +1545,14 @@ def run_pipeline(args: argparse.Namespace) -> None:
             failures,
             args.min_confidence,
         )
+        save_run_progress(
+            progress_path,
+            last_processed_index=processed_count,
+            next_start_index=min(total_institutions + 1, processed_count + 1),
+            total_institutions=total_institutions,
+            saved_rows=saved_rows,
+            saved_failed=saved_failed,
+        )
         phase = "final" if force else f"checkpoint @ {processed_count}"
         print(
             f"[SAVE] {phase}: {saved_rows} exhibition rows, {saved_failed} failed domains"
@@ -1506,6 +1560,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     try:
         for idx, inst in enumerate(institutions, start=1):
+            absolute_idx = start_index + idx - 1
             cap_base_urls = max(0, args.max_base_urls_per_institution)
             base_urls = inst.official_urls
             if cap_base_urls > 0:
@@ -1532,7 +1587,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
                     break
 
             print(
-                f"[{idx}/{len(institutions)}] {inst.title}: "
+                f"[{absolute_idx}/{total_institutions}] {inst.title}: "
+                f"[batch: {absolute_idx - start_index + 1}/{end_index - start_index + 1}] "
                 f"{len(pages)} candidate pages from {len(base_urls)} base urls"
             )
 
@@ -1601,7 +1657,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
                 time.sleep(args.pause)
 
-            maybe_checkpoint(idx)
+            maybe_checkpoint(absolute_idx)
+            last_processed_index = absolute_idx
     except KeyboardInterrupt:
         interrupted = True
         print("[WARN] Interrupted by user. Saving partial results...")
@@ -1612,6 +1669,14 @@ def run_pipeline(args: argparse.Namespace) -> None:
             event_rows,
             failures,
             args.min_confidence,
+        )
+        save_run_progress(
+            progress_path,
+            last_processed_index=last_processed_index,
+            next_start_index=min(total_institutions + 1, last_processed_index + 1),
+            total_institutions=total_institutions,
+            saved_rows=saved_rows,
+            saved_failed=saved_failed,
         )
         print(f"Saved {saved_rows} exhibition rows -> {output_csv}")
         print(f"Saved {saved_failed} failed domains -> {failed_domains_out}")
@@ -1743,6 +1808,22 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="1-based institution index to start from. Use this to resume from a later point.",
+    )
+    parser.add_argument(
+        "--end-index",
+        type=int,
+        default=0,
+        help="1-based institution index to end at (inclusive). 0 means process until the end.",
+    )
+    parser.add_argument(
+        "--progress-file",
+        default=DEFAULT_PROGRESS_PATH,
+        help="Progress JSON path used for automatic resume and last-processed tracking.",
+    )
+    parser.add_argument(
+        "--no-auto-resume",
+        action="store_true",
+        help="Disable automatic resume from the progress JSON file.",
     )
     return parser
 
