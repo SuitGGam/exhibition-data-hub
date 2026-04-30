@@ -118,6 +118,90 @@ python src/collect_naver_local.py --no-auto-resume
 
 python src/collect_exhibition_events.py
 
+### 팀원 실행 가이드
+
+아래 순서대로 세팅하면 각 팀원이 같은 방식으로 실행할 수 있습니다.
+
+1. Python 3.14 설치
+
+Windows 기준으로 Python 3.14를 설치합니다. 설치 후 터미널에서 확인합니다.
+
+python --version
+
+2. 가상환경 생성 및 활성화
+
+프로젝트 루트에서 가상환경을 만들고 활성화합니다.
+
+python -m venv .venv
+.venv\Scripts\activate
+
+3. 패키지 설치
+
+requirements.txt에 있는 패키지를 설치합니다.
+
+pip install -r requirements.txt
+
+4. Playwright 브라우저 설치
+
+JS 렌더링이나 Instagram 추출을 사용할 경우 Chromium을 추가 설치합니다.
+
+python -m playwright install chromium
+
+5. 환경 변수 설정
+
+.env 파일에 필요한 값을 넣습니다.
+
+- NAVER_CLIENT_ID
+- NAVER_CLIENT_SECRET
+- INSTAGRAM_USER (선택)
+- INSTAGRAM_PASS (선택)
+- INSTAGRAM_PROXY (선택)
+- TESSERACT_CMD (선택)
+
+6. 실행 전 확인
+
+입력 CSV와 출력 폴더가 준비되어 있는지 확인합니다.
+
+- 기본 입력: data/test_naver_local_exhibitions.csv
+- 기본 출력: data/extracted_exhibitions.csv
+- 진행 파일: data/exhibition_extraction_progress.json
+
+7. 분할 실행
+
+기관을 나눠서 각각 다른 범위로 실행합니다. 중간에 끊겨도 각 구간은 진행 파일 기준으로 다시 이어서 실행할 수 있습니다.
+
+사람 1:
+
+python src/collect_exhibition_events.py --start-index 1 --end-index 1756 --progress-file data/exhibition_extraction_progress_1.json
+
+사람 2:
+
+python src/collect_exhibition_events.py --start-index 1757 --end-index 3512 --progress-file data/exhibition_extraction_progress_2.json
+
+사람 3:
+
+python src/collect_exhibition_events.py --start-index 3513 --end-index 5268 --progress-file data/exhibition_extraction_progress_3.json
+
+8. 공통 옵션
+
+필요에 따라 아래 옵션을 같이 붙입니다.
+
+- --enable-js-render : JavaScript 렌더링 사용
+- --enable-image-ocr : 이미지 OCR 사용
+- --enable-instagram : Instagram 추출 사용
+- --no-auto-resume : 자동 재개를 끄고 처음부터 범위만 실행
+- --save-every 10 : 더 자주 저장
+
+9. 결과 확인
+
+각 팀원이 만든 CSV를 확인한 뒤, 필요하면 하나의 결과로 합칩니다.
+
+### Notes
+
+- 각 팀원이 같은 출력 파일을 동시에 쓰지 않도록 `--output`과 `--progress-file`을 분리하는 편이 안전합니다.
+- 범위를 나눠 실행할 때는 `--start-index`와 `--end-index`를 반드시 같이 지정하는 편이 명확합니다.
+- Instagram 추출은 가장 느릴 수 있으므로 필요하지 않으면 끄고, 필요한 구간만 따로 돌리는 편이 좋습니다.
+
 자주 쓰는 실행 예시:
 
 빠른 테스트:
