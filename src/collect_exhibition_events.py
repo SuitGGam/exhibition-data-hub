@@ -1736,6 +1736,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS, help="HTTP timeout seconds")
     parser.add_argument("--pause", type=float, default=DEFAULT_PAUSE_SECONDS, help="Pause between page requests")
     parser.add_argument(
+        "--institution-timeout",
+        type=int,
+        default=0,
+        help="Per-institution timeout in seconds (0 = no limit)",
+    )
+    parser.add_argument(
         "--max-pages-per-institution",
         type=int,
         default=DEFAULT_MAX_PAGES_PER_INSTITUTION,
