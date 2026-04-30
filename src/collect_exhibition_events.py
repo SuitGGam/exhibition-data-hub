@@ -930,6 +930,10 @@ def extract_ocr_text_from_image(image_url: str, timeout: int) -> str:
     except ImportError:
         return ""
 
+    # URL 검증: 공백이나 제어문자가 있으면 건너뛰기
+    if not image_url or any(ord(c) < 32 for c in image_url):
+        return ""
+
     req = urllib.request.Request(
         image_url,
         headers={
@@ -938,8 +942,11 @@ def extract_ocr_text_from_image(image_url: str, timeout: int) -> str:
         },
     )
 
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = resp.read()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read()
+    except (urllib.error.HTTPError, urllib.error.URLError, Exception):
+        return ""
 
     if not data:
         return ""
