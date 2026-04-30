@@ -113,7 +113,7 @@ def extract_events_from_instagram(institution: Institution, instagram_url: str, 
     if sync_playwright is None:
         return results
 
-    max_posts = int(getattr(args, "instagram_max_posts", 20) or 20)
+    max_posts = int(getattr(args, "instagram_max_posts", 8) or 8)
     per_post_delay = float(getattr(args, "instagram_post_delay", 4.0) or 4.0)
     page_timeout = int(getattr(args, "instagram_timeout_ms", 10000) or 10000)
     proxy_url = str(getattr(args, "instagram_proxy", "") or "").strip()
