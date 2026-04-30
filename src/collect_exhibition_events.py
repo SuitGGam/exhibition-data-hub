@@ -1599,9 +1599,26 @@ def run_pipeline(args: argparse.Namespace) -> None:
                 f"{len(pages)} candidate pages from {len(base_urls)} base urls"
             )
 
+            # Per-institution timeout handling
+            institution_timeout = int(getattr(args, "institution_timeout", 0) or 0)
+            inst_start_time = time.monotonic()
+            inst_deadline = inst_start_time + institution_timeout if institution_timeout > 0 else None
+            skip_institution = False
+
             # If Instagram handling is enabled, process instagram base URLs with Playwright extractor
             if args.enable_instagram:
                 for base_url in base_urls:
+                    # skip institution if deadline exceeded
+                    if inst_deadline and time.monotonic() > inst_deadline:
+                        add_failure(
+                            failures,
+                            inst,
+                            inst.official_url,
+                            "institution-timeout",
+                            TimeoutError("institution timeout reached"),
+                        )
+                        skip_institution = True
+                        break
                     if "instagram.com" in base_url.lower():
                         try:
                             try:
@@ -1633,7 +1650,23 @@ def run_pipeline(args: argparse.Namespace) -> None:
                         except Exception as exc:  # noqa: BLE001
                             add_failure(failures, inst, base_url, "instagram-invoke", exc)
 
+                if skip_institution:
+                    maybe_checkpoint(absolute_idx)
+                    last_processed_index = absolute_idx
+                    continue
+
             for page in pages:
+                # skip institution if deadline exceeded
+                if inst_deadline and time.monotonic() > inst_deadline:
+                    add_failure(
+                        failures,
+                        inst,
+                        inst.official_url,
+                        "institution-timeout",
+                        TimeoutError("institution timeout reached"),
+                    )
+                    skip_institution = True
+                    break
                 events = extract_events_from_page(
                     inst,
                     page,
