@@ -4,16 +4,25 @@
 
 ## What This Project Does
 
-이 저장소에는 두 개의 주요 수집 스크립트가 있습니다.
+이 저장소에는 세 개의 주요 스크립트가 있습니다.
 
 1. `src/collect_naver_local.py`
 - 네이버 지역 검색 API로 전시/문화 관련 기관 후보를 수집
+- 배치 처리 지원 (일부 조합만 처리하고 재개 가능)
+- 진행 상태를 JSON으로 저장하여 중단 후 자동 재개 지원
 - 결과 CSV 생성
 
 2. `src/collect_exhibition_events.py`
 - 기관 홈페이지(여러 URL 포함)에서 전시명/기간/가격/설명을 추출
 - 정적 HTML 파싱 → JS 렌더링(선택) → 이미지 OCR(선택) 순서로 탐색
-- 중단 시 체크포인트 저장 지원
+- Instagram 프로필/게시물에서 전시 정보 추출 (선택)
+- 진행 상태를 JSON으로 저장하여 중단 후 자동 재개 지원
+- 중단 시 체크포인트 저장
+
+3. `src/collect_instagram.py` (내부용)
+- Playwright 기반 Instagram 추출 모듈
+- 인스타그램 프로필/직접 게시물 URL 처리
+- 이미지 캡션 및 OCR 텍스트에서 날짜 추출
 
 ## Requirements
 
@@ -39,7 +48,7 @@ source .venv/bin/activate
 
 pip install -r requirements.txt
 
-### 3) Playwright 브라우저 설치 (JS 렌더링 사용할 때만)
+### 3) Playwright 브라우저 설치 (JS 렌더링 또는 Instagram 추출 사용할 때)
 
 python -m playwright install chromium
 
@@ -51,13 +60,22 @@ python -m playwright install chromium
 - NAVER_CLIENT_ID
 - NAVER_CLIENT_SECRET
 
-선택:
-- NAVER_LOCAL_SORT (random 또는 comment, 기본값 random)
+Instagram 추출용 (선택):
+- INSTAGRAM_USER (Instagram 계정명, 로그인 기반 스크래핑용)
+- INSTAGRAM_PASS (Instagram 비밀번호)
+- INSTAGRAM_PROXY (선택, 프록시 URL: http://host:port)
+
+OCR용 (선택):
 - TESSERACT_CMD (PATH로 못 찾을 때 Tesseract 실행 파일 절대 경로)
+
+Naver Local API 검색 순서 (선택):
+- NAVER_LOCAL_SORT (random 또는 comment, 기본값 random)
 
 Windows 예시:
 
 TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
+INSTAGRAM_USER=your_username
+INSTAGRAM_PASS=your_password
 
 ## Input Files
 
@@ -67,18 +85,32 @@ TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
 
 ## Script 1: Local Institution Collection
 
-실행:
+기본 실행:
 
 python src/collect_naver_local.py
 
+배치 처리 (첫 5000개 조합만):
+
+python src/collect_naver_local.py --batch-size 5000
+
+특정 지점부터 재개:
+
+python src/collect_naver_local.py --start-index 50000
+
+자동 재개 비활성화:
+
+python src/collect_naver_local.py --no-auto-resume
+
 출력:
 
-- data/naver_local_exhibitions.csv
+- data/naver_local_exhibitions.csv (수집된 기관 목록)
+- data/naver_local_progress.json (진행 상태, 자동 재개용)
 
 설명:
 
 - docs/regions.md와 docs/keywords.md의 조합으로 네이버 지역 검색 API를 호출합니다.
 - 중복 기관은 제목/주소/공식 URL 조합으로 제거합니다.
+- 중단 시에도 진행 상태가 저장되어 다음 실행 시 자동으로 이어집니다.
 
 ## Script 2: Exhibition Event Extraction
 
@@ -100,31 +132,91 @@ OCR 포함:
 
 python src/collect_exhibition_events.py --enable-image-ocr --max-images-per-page 3
 
+Instagram 추출 포함 (긴 딜레이):
+
+python src/collect_exhibition_events.py --enable-instagram --instagram-random-delay-min 10 --instagram-random-delay-max 30
+
 전체 옵션 조합 예시:
 
-python src/collect_exhibition_events.py --enable-js-render --enable-image-ocr --save-every 10
+python src/collect_exhibition_events.py --enable-js-render --enable-image-ocr --enable-instagram --save-every 10
+
+특정 기관부터 재개:
+
+python src/collect_exhibition_events.py --start-index 1000
+
+특정 범위만 실행:
+
+python src/collect_exhibition_events.py --start-index 1000 --end-index 2000
+
+자동 재개 비활성화:
+
+python src/collect_exhibition_events.py --no-auto-resume
 
 ### Main Output Files
 
-- data/extracted_exhibitions.csv
-- data/failed_domains.csv
+- data/extracted_exhibitions.csv (추출된 전시 정보)
+- data/failed_domains.csv (실패한 도메인 요약)
+- data/exhibition_extraction_progress.json (진행 상태, 자동 재개용)
 
 ### 주요 옵션 (기본값)
 
+**입출력:**
 - --input (data/test_naver_local_exhibitions.csv)
 - --output (data/extracted_exhibitions.csv)
 - --failed-domains-out (data/failed_domains.csv)
-- --timeout (8)
-- --pause (0.15)
+- --progress-file (data/exhibition_extraction_progress.json)
+
+**진행 제어:**
+- --start-index (1, 1-based 기관 번호)
+- --end-index (0, 끝까지. 1-based 기관 번호 기준 종료 지점)
+- --max-institutions (0, 전체)
+- --save-every (25, N개마다 체크포인트 저장)
+- --no-auto-resume (자동 재개 비활성화)
+
+**네트워크:**
+- --timeout (8초)
+- --pause (0.15초, 페이지 간 대기)
 - --max-pages-per-institution (8)
 - --max-base-urls-per-institution (3)
-- --max-institutions (0, 전체)
-- --min-confidence (0.75)
-- --save-every (25)
-- --enable-js-render
+
+**추출 옵션:**
+- --enable-js-render (JavaScript 렌더링)
 - --js-render-timeout-ms (12000)
-- --enable-image-ocr
+- --enable-image-ocr (이미지 OCR)
 - --max-images-per-page (3)
+- --enable-instagram (Instagram 추출)
+
+**Instagram 옵션:**
+- --instagram-max-posts (20)
+- --instagram-post-delay (4.0초)
+- --instagram-profile-delay (8.0초)
+- --instagram-random-delay-min (10.0초)
+- --instagram-random-delay-max (30.0초)
+- --instagram-timeout-ms (10000)
+- --instagram-proxy (프록시 URL)
+- --instagram-username (.env의 INSTAGRAM_USER)
+- --instagram-password (.env의 INSTAGRAM_PASS)
+
+**필터링:**
+- --min-confidence (0.75)
+
+### 3인 분할 실행 예시
+
+기관을 세 구간으로 나눠 동시에 실행할 수 있습니다.
+
+사람 1:
+
+python src/collect_exhibition_events.py --start-index 1 --end-index 1756
+
+사람 2:
+
+python src/collect_exhibition_events.py --start-index 1757 --end-index 3512
+
+사람 3:
+
+python src/collect_exhibition_events.py --start-index 3513 --end-index 5268
+
+각 구간은 별도 진행 파일을 쓰고 싶으면 `--progress-file`만 다르게 지정하면 됩니다. 중단된 구간은 마지막 저장 지점부터 다시 이어서 실행할 수 있습니다.
 
 ## OCR Notes
 
