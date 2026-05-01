@@ -19,6 +19,7 @@ from urllib.error import HTTPError, URLError
 DEFAULT_INPUT_CSV = "data/test_naver_local_exhibitions.csv"
 DEFAULT_OUTPUT_CSV = "data/extracted_exhibitions.csv"
 DEFAULT_FAILED_DOMAINS_OUT = "data/failed_domains.csv"
+DEFAULT_TIMEOUT_PAGES_OUT = "data/timeout_pages.csv"
 DEFAULT_TIMEOUT_SECONDS = 8
 DEFAULT_PAUSE_SECONDS = 0.15
 DEFAULT_HTTP_RETRY_COUNT = 2
@@ -56,6 +57,17 @@ FAILED_DOMAIN_FIELDNAMES = [
     "last_institution",
     "sample_url",
     "sample_message",
+]
+
+TIMEOUT_PAGE_FIELDNAMES = [
+    "institution_id",
+    "institution_title",
+    "institution_url",
+    "page_url",
+    "stage",
+    "timeout_seconds",
+    "elapsed_seconds",
+    "recorded_at",
 ]
 
 URL_SOURCE_FIELDS = [
@@ -326,6 +338,25 @@ class FailureRecord:
     error_message: str
 
 
+@dataclass
+class TimeoutPageRecord:
+    institution_id: str
+    institution_title: str
+    institution_url: str
+    page_url: str
+    stage: str
+    timeout_seconds: float
+    elapsed_seconds: float
+    recorded_at: str
+
+
+class InstitutionTimeoutError(TimeoutError):
+    def __init__(self, url: str, stage: str, message: str = "institution timeout reached") -> None:
+        super().__init__(message)
+        self.url = url
+        self.stage = stage
+
+
 class LinkExtractor(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -461,6 +492,62 @@ def add_failure(
             error_message=str(error),
         )
     )
+
+
+def add_timeout_page(
+    timeout_pages: list[TimeoutPageRecord],
+    institution: Institution,
+    page_url: str,
+    stage: str,
+    timeout_seconds: float,
+    elapsed_seconds: float,
+) -> None:
+    timeout_pages.append(
+        TimeoutPageRecord(
+            institution_id=institution.institution_id,
+            institution_title=institution.title,
+            institution_url=institution.official_url,
+            page_url=page_url,
+            stage=stage,
+            timeout_seconds=float(timeout_seconds),
+            elapsed_seconds=max(0.0, float(elapsed_seconds)),
+            recorded_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+        )
+    )
+
+
+def ensure_institution_deadline(
+    institution: Institution,
+    page_url: str,
+    stage: str,
+    inst_deadline: float | None,
+    institution_timeout: int,
+    inst_started_at: float,
+    timeout_pages: list[TimeoutPageRecord],
+) -> None:
+    if inst_deadline is None:
+        return
+
+    if time.monotonic() <= inst_deadline:
+        return
+
+    add_timeout_page(
+        timeout_pages=timeout_pages,
+        institution=institution,
+        page_url=page_url,
+        stage=stage,
+        timeout_seconds=float(institution_timeout),
+        elapsed_seconds=time.monotonic() - inst_started_at,
+    )
+    raise InstitutionTimeoutError(url=page_url, stage=stage)
+
+
+def bounded_timeout(default_timeout: float, inst_deadline: float | None) -> float:
+    if inst_deadline is None:
+        return float(default_timeout)
+
+    remaining = inst_deadline - time.monotonic()
+    return max(0.01, min(float(default_timeout), remaining))
 
 
 def load_markdown_bullets(path: Path) -> list[str]:
@@ -614,7 +701,7 @@ def load_institutions(input_csv: Path, keyword_hints: list[str]) -> list[Institu
     return institutions
 
 
-def http_get(url: str, timeout: int) -> str:
+def http_get(url: str, timeout: float) -> str:
     # Normalize URL: encode spaces and control characters in path while preserving structure
     parsed = urllib.parse.urlparse(url)
     # Quote the path while preserving path separators; safe chars include :/?#[]@!$&'()*+,;=
@@ -702,13 +789,27 @@ def extract_links(html: str, base_url: str) -> list[str]:
 def extract_sitemap_links(
     institution: Institution,
     base_url: str,
-    timeout: int,
+    timeout: float,
     failures: list[FailureRecord],
+    inst_deadline: float | None,
+    institution_timeout: int,
+    inst_started_at: float,
+    timeout_pages: list[TimeoutPageRecord],
 ) -> list[str]:
+    ensure_institution_deadline(
+        institution=institution,
+        page_url=base_url,
+        stage="sitemap",
+        inst_deadline=inst_deadline,
+        institution_timeout=institution_timeout,
+        inst_started_at=inst_started_at,
+        timeout_pages=timeout_pages,
+    )
+
     parsed = urllib.parse.urlparse(base_url)
     sitemap_url = f"{parsed.scheme}://{parsed.netloc}/sitemap.xml"
     try:
-        xml_text = http_get(sitemap_url, timeout)
+        xml_text = http_get(sitemap_url, bounded_timeout(timeout, inst_deadline))
     except (HTTPError, URLError, TimeoutError, ValueError, RuntimeError, OSError) as exc:
         add_failure(failures, institution, sitemap_url, "sitemap", exc)
         return []
@@ -729,19 +830,44 @@ def discover_pages(
     institution: Institution,
     base_url: str,
     max_pages: int,
-    timeout: int,
+    timeout: float,
     failures: list[FailureRecord],
+    inst_deadline: float | None,
+    institution_timeout: int,
+    inst_started_at: float,
+    timeout_pages: list[TimeoutPageRecord],
 ) -> list[str]:
     pages: list[str] = [base_url]
 
+    ensure_institution_deadline(
+        institution=institution,
+        page_url=base_url,
+        stage="discover-pages",
+        inst_deadline=inst_deadline,
+        institution_timeout=institution_timeout,
+        inst_started_at=inst_started_at,
+        timeout_pages=timeout_pages,
+    )
+
     try:
-        homepage = http_get(base_url, timeout)
+        homepage = http_get(base_url, bounded_timeout(timeout, inst_deadline))
         pages.extend(extract_links(homepage, base_url))
     except (HTTPError, URLError, TimeoutError, ValueError, RuntimeError, OSError) as exc:
         add_failure(failures, institution, base_url, "homepage", exc)
         homepage = ""
 
-    pages.extend(extract_sitemap_links(institution, base_url, timeout, failures))
+    pages.extend(
+        extract_sitemap_links(
+            institution,
+            base_url,
+            timeout,
+            failures,
+            inst_deadline,
+            institution_timeout,
+            inst_started_at,
+            timeout_pages,
+        )
+    )
 
     unique: list[str] = []
     seen: set[str] = set()
@@ -923,7 +1049,11 @@ def resolve_tesseract_command() -> str:
     return ""
 
 
-def extract_ocr_text_from_image(image_url: str, timeout: int) -> str:
+def extract_ocr_text_from_image(
+    image_url: str,
+    timeout: float,
+    ocr_timeout_seconds: float | None = None,
+) -> str:
     try:
         import io
         from PIL import Image
@@ -956,7 +1086,48 @@ def extract_ocr_text_from_image(image_url: str, timeout: int) -> str:
     except Exception:  # noqa: BLE001
         return ""
 
-    return run_tesseract_ocr_variants(img)
+    if ocr_timeout_seconds is not None and ocr_timeout_seconds <= 0:
+        return ""
+
+    try:
+        import pytesseract
+    except ImportError:
+        return run_tesseract_ocr_variants(img)
+
+    tesseract_cmd = resolve_tesseract_command()
+    if not tesseract_cmd:
+        return ""
+    pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+
+    configs = [
+        "--oem 3 --psm 6",
+        "--oem 3 --psm 11",
+        "--oem 3 --psm 12",
+    ]
+
+    best_text = ""
+    best_score = 0.0
+    ocr_started_at = time.monotonic()
+    for variant in preprocess_ocr_image(img):
+        for config in configs:
+            kwargs = {"lang": "kor+eng", "config": config}
+            if ocr_timeout_seconds is not None:
+                remaining = ocr_timeout_seconds - (time.monotonic() - ocr_started_at)
+                if remaining <= 0:
+                    return best_text
+                kwargs["timeout"] = max(0.01, remaining)
+
+            try:
+                text = normalize_text(pytesseract.image_to_string(variant, **kwargs))
+            except Exception:  # noqa: BLE001
+                continue
+
+            score = score_ocr_text(text)
+            if score > best_score or (score == best_score and len(text) > len(best_text)):
+                best_score = score
+                best_text = text
+
+    return best_text
 
 
 def normalize_date_text(value: str, reference_year: int | None = None) -> str:
@@ -1200,20 +1371,34 @@ def parse_text_events(lines: list[str], keyword_hints: list[str]) -> list[dict[s
 def extract_events_from_page(
     institution: Institution,
     page_url: str,
-    timeout: int,
+    timeout: float,
     keyword_hints: list[str],
     failures: list[FailureRecord],
     enable_js_render: bool,
     js_render_timeout_ms: int,
     enable_image_ocr: bool,
     max_images_per_page: int,
+    inst_deadline: float | None,
+    institution_timeout: int,
+    inst_started_at: float,
+    timeout_pages: list[TimeoutPageRecord],
 ) -> list[dict[str, str]]:
+    ensure_institution_deadline(
+        institution=institution,
+        page_url=page_url,
+        stage="page-start",
+        inst_deadline=inst_deadline,
+        institution_timeout=institution_timeout,
+        inst_started_at=inst_started_at,
+        timeout_pages=timeout_pages,
+    )
+
     low = page_url.lower()
     if any(skip in low for skip in SKIP_PAGE_URL_KEYWORDS):
         return []
 
     try:
-        html_text = http_get(page_url, timeout)
+        html_text = http_get(page_url, bounded_timeout(timeout, inst_deadline))
     except (HTTPError, URLError, TimeoutError, ValueError, RuntimeError, OSError) as exc:
         add_failure(failures, institution, page_url, "page", exc)
         return []
@@ -1230,8 +1415,21 @@ def extract_events_from_page(
 
     render_html = ""
     if enable_js_render:
+        ensure_institution_deadline(
+            institution=institution,
+            page_url=page_url,
+            stage="js-render",
+            inst_deadline=inst_deadline,
+            institution_timeout=institution_timeout,
+            inst_started_at=inst_started_at,
+            timeout_pages=timeout_pages,
+        )
         try:
-            render_html = render_page_with_playwright(page_url, max(1000, js_render_timeout_ms))
+            effective_js_timeout = max(1, js_render_timeout_ms)
+            if inst_deadline is not None:
+                remaining_ms = int(max(1.0, (inst_deadline - time.monotonic()) * 1000.0))
+                effective_js_timeout = max(1, min(effective_js_timeout, remaining_ms))
+            render_html = render_page_with_playwright(page_url, effective_js_timeout)
         except Exception as exc:  # noqa: BLE001
             add_failure(failures, institution, page_url, "js-render", exc)
             render_html = ""
@@ -1258,12 +1456,29 @@ def extract_events_from_page(
 
     ocr_events: list[dict[str, str]] = []
     for image in images[: max(0, max_images_per_page)]:
+        ensure_institution_deadline(
+            institution=institution,
+            page_url=page_url,
+            stage="ocr-loop",
+            inst_deadline=inst_deadline,
+            institution_timeout=institution_timeout,
+            inst_started_at=inst_started_at,
+            timeout_pages=timeout_pages,
+        )
+
         image_url = image.get("url", "")
         if not image_url:
             continue
 
         try:
-            ocr_text = extract_ocr_text_from_image(image_url, timeout)
+            ocr_budget = None
+            if inst_deadline is not None:
+                ocr_budget = max(0.01, inst_deadline - time.monotonic())
+            ocr_text = extract_ocr_text_from_image(
+                image_url,
+                bounded_timeout(timeout, inst_deadline),
+                ocr_timeout_seconds=ocr_budget,
+            )
         except (HTTPError, URLError, TimeoutError, ValueError, RuntimeError, OSError) as exc:
             add_failure(failures, institution, image_url, "ocr-image", exc)
             continue
@@ -1374,6 +1589,54 @@ def load_existing_failures(path: Path) -> list[FailureRecord]:
     return failures
 
 
+def load_existing_timeout_pages(path: Path) -> list[TimeoutPageRecord]:
+    timeout_pages: list[TimeoutPageRecord] = []
+    for row in read_csv_rows(path):
+        try:
+            timeout_seconds = float(row.get("timeout_seconds", "0") or 0)
+        except ValueError:
+            timeout_seconds = 0.0
+
+        try:
+            elapsed_seconds = float(row.get("elapsed_seconds", "0") or 0)
+        except ValueError:
+            elapsed_seconds = 0.0
+
+        timeout_pages.append(
+            TimeoutPageRecord(
+                institution_id=str(row.get("institution_id", "")),
+                institution_title=str(row.get("institution_title", "")),
+                institution_url=str(row.get("institution_url", "")),
+                page_url=str(row.get("page_url", "")),
+                stage=str(row.get("stage", "")),
+                timeout_seconds=timeout_seconds,
+                elapsed_seconds=elapsed_seconds,
+                recorded_at=str(row.get("recorded_at", "")),
+            )
+        )
+
+    return timeout_pages
+
+
+def write_timeout_pages(path: Path, timeout_pages: list[TimeoutPageRecord]) -> None:
+    rows: list[dict[str, str]] = []
+    for item in timeout_pages:
+        rows.append(
+            {
+                "institution_id": item.institution_id,
+                "institution_title": item.institution_title,
+                "institution_url": item.institution_url,
+                "page_url": item.page_url,
+                "stage": item.stage,
+                "timeout_seconds": f"{item.timeout_seconds:.2f}",
+                "elapsed_seconds": f"{item.elapsed_seconds:.2f}",
+                "recorded_at": item.recorded_at,
+            }
+        )
+
+    write_csv(path, rows, TIMEOUT_PAGE_FIELDNAMES)
+
+
 def build_curated_events(
     event_rows: list[dict[str, str]],
     min_confidence: float,
@@ -1389,10 +1652,12 @@ def build_curated_events(
 def save_progress(
     output_csv: Path,
     failed_domains_out: Path,
+    timeout_pages_out: Path,
     event_rows: list[dict[str, str]],
     failures: list[FailureRecord],
+    timeout_pages: list[TimeoutPageRecord],
     min_confidence: float,
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     curated_events = build_curated_events(event_rows, min_confidence)
     write_csv(
         output_csv,
@@ -1406,7 +1671,9 @@ def save_progress(
         failed_domain_rows,
         FAILED_DOMAIN_FIELDNAMES,
     )
-    return len(curated_events), len(failed_domain_rows)
+
+    write_timeout_pages(timeout_pages_out, timeout_pages)
+    return len(curated_events), len(failed_domain_rows), len(timeout_pages)
 
 
 def load_run_progress(progress_path: Path) -> dict:
@@ -1425,6 +1692,7 @@ def save_run_progress(
     total_institutions: int,
     saved_rows: int,
     saved_failed: int,
+    saved_timeout_pages: int,
 ) -> None:
     progress_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -1433,6 +1701,7 @@ def save_run_progress(
         "total_institutions": total_institutions,
         "saved_rows": saved_rows,
         "saved_failed": saved_failed,
+        "saved_timeout_pages": saved_timeout_pages,
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     progress_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1489,6 +1758,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
     input_csv = root / args.input
     output_csv = root / args.output
     failed_domains_out = root / args.failed_domains_out
+    timeout_pages_out = root / args.timeout_pages_out
     progress_path = root / args.progress_file
     keyword_hints = load_markdown_bullets(root / "docs" / "keywords.md")
 
@@ -1518,6 +1788,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     event_rows: list[dict[str, str]] = []
     failures: list[FailureRecord] = []
+    timeout_pages: list[TimeoutPageRecord] = []
     if start_index > 1:
         previous_events = load_existing_event_rows(output_csv)
         if previous_events:
@@ -1528,6 +1799,11 @@ def run_pipeline(args: argparse.Namespace) -> None:
         if previous_failures:
             failures.extend(previous_failures)
             print(f"[RESUME] Loaded {len(previous_failures)} existing failure records from {failed_domains_out}")
+
+        previous_timeout_pages = load_existing_timeout_pages(timeout_pages_out)
+        if previous_timeout_pages:
+            timeout_pages.extend(previous_timeout_pages)
+            print(f"[RESUME] Loaded {len(previous_timeout_pages)} timeout page records from {timeout_pages_out}")
 
     print(f"Loaded {len(institutions)} candidate institutions")
     print(f"Progress file: {progress_path}")
@@ -1545,11 +1821,13 @@ def run_pipeline(args: argparse.Namespace) -> None:
             if processed_count <= 0 or processed_count % checkpoint_step != 0:
                 return
 
-        saved_rows, saved_failed = save_progress(
+        saved_rows, saved_failed, saved_timeout_pages = save_progress(
             output_csv,
             failed_domains_out,
+            timeout_pages_out,
             event_rows,
             failures,
+            timeout_pages,
             args.min_confidence,
         )
         save_run_progress(
@@ -1559,30 +1837,68 @@ def run_pipeline(args: argparse.Namespace) -> None:
             total_institutions=total_institutions,
             saved_rows=saved_rows,
             saved_failed=saved_failed,
+            saved_timeout_pages=saved_timeout_pages,
         )
         phase = "final" if force else f"checkpoint @ {processed_count}"
         print(
-            f"[SAVE] {phase}: {saved_rows} exhibition rows, {saved_failed} failed domains"
+            f"[SAVE] {phase}: {saved_rows} exhibition rows, {saved_failed} failed domains, {saved_timeout_pages} timeout pages"
         )
 
     try:
         for idx, inst in enumerate(institutions, start=1):
             absolute_idx = start_index + idx - 1
+            
+            # Per-institution timeout: set deadline at start
+            institution_timeout = int(getattr(args, "institution_timeout", 0) or 0)
+            inst_start_time = time.monotonic()
+            inst_deadline = inst_start_time + institution_timeout if institution_timeout > 0 else None
+            
+            # Check timeout before discover_pages
+            if inst_deadline and time.monotonic() > inst_deadline:
+                add_timeout_page(
+                    timeout_pages,
+                    inst,
+                    inst.official_url,
+                    "institution-timeout",
+                    float(institution_timeout),
+                    time.monotonic() - inst_start_time,
+                )
+                add_failure(
+                    failures,
+                    inst,
+                    inst.official_url,
+                    "institution-timeout",
+                    TimeoutError("institution timeout reached"),
+                )
+                maybe_checkpoint(absolute_idx)
+                last_processed_index = absolute_idx
+                continue
+            
             cap_base_urls = max(0, args.max_base_urls_per_institution)
             base_urls = inst.official_urls
             if cap_base_urls > 0:
                 base_urls = base_urls[:cap_base_urls]
 
+            skip_institution = False
             pages: list[str] = []
             seen_pages: set[str] = set()
             for base_url in base_urls:
-                discovered = discover_pages(
-                    inst,
-                    base_url,
-                    args.max_pages_per_institution,
-                    args.timeout,
-                    failures,
-                )
+                try:
+                    discovered = discover_pages(
+                        inst,
+                        base_url,
+                        args.max_pages_per_institution,
+                        args.timeout,
+                        failures,
+                        inst_deadline,
+                        institution_timeout,
+                        inst_start_time,
+                        timeout_pages,
+                    )
+                except InstitutionTimeoutError as exc:
+                    add_failure(failures, inst, exc.url, exc.stage, exc)
+                    skip_institution = True
+                    break
                 for page in discovered:
                     if page in seen_pages:
                         continue
@@ -1593,23 +1909,51 @@ def run_pipeline(args: argparse.Namespace) -> None:
                 if len(pages) >= args.max_pages_per_institution:
                     break
 
+            if skip_institution:
+                maybe_checkpoint(absolute_idx)
+                last_processed_index = absolute_idx
+                continue
+
             print(
                 f"[{absolute_idx}/{total_institutions}] {inst.title}: "
                 f"[batch: {absolute_idx - start_index + 1}/{end_index - start_index + 1}] "
                 f"{len(pages)} candidate pages from {len(base_urls)} base urls"
             )
 
-            # Per-institution timeout handling
-            institution_timeout = int(getattr(args, "institution_timeout", 0) or 0)
-            inst_start_time = time.monotonic()
-            inst_deadline = inst_start_time + institution_timeout if institution_timeout > 0 else None
-            skip_institution = False
-
+            # Check timeout before processing pages/instagram
+            if inst_deadline and time.monotonic() > inst_deadline:
+                add_timeout_page(
+                    timeout_pages,
+                    inst,
+                    inst.official_url,
+                    "institution-timeout",
+                    float(institution_timeout),
+                    time.monotonic() - inst_start_time,
+                )
+                add_failure(
+                    failures,
+                    inst,
+                    inst.official_url,
+                    "institution-timeout",
+                    TimeoutError("institution timeout reached"),
+                )
+                maybe_checkpoint(absolute_idx)
+                last_processed_index = absolute_idx
+                continue
+            
             # If Instagram handling is enabled, process instagram base URLs with Playwright extractor
             if args.enable_instagram:
                 for base_url in base_urls:
                     # skip institution if deadline exceeded
                     if inst_deadline and time.monotonic() > inst_deadline:
+                        add_timeout_page(
+                            timeout_pages,
+                            inst,
+                            base_url,
+                            "institution-timeout",
+                            float(institution_timeout),
+                            time.monotonic() - inst_start_time,
+                        )
                         add_failure(
                             failures,
                             inst,
@@ -1658,6 +2002,14 @@ def run_pipeline(args: argparse.Namespace) -> None:
             for page in pages:
                 # skip institution if deadline exceeded
                 if inst_deadline and time.monotonic() > inst_deadline:
+                    add_timeout_page(
+                        timeout_pages,
+                        inst,
+                        page,
+                        "institution-timeout",
+                        float(institution_timeout),
+                        time.monotonic() - inst_start_time,
+                    )
                     add_failure(
                         failures,
                         inst,
@@ -1667,17 +2019,26 @@ def run_pipeline(args: argparse.Namespace) -> None:
                     )
                     skip_institution = True
                     break
-                events = extract_events_from_page(
-                    inst,
-                    page,
-                    args.timeout,
-                    keyword_hints,
-                    failures,
-                    args.enable_js_render,
-                    args.js_render_timeout_ms,
-                    args.enable_image_ocr,
-                    args.max_images_per_page,
-                )
+                try:
+                    events = extract_events_from_page(
+                        inst,
+                        page,
+                        args.timeout,
+                        keyword_hints,
+                        failures,
+                        args.enable_js_render,
+                        args.js_render_timeout_ms,
+                        args.enable_image_ocr,
+                        args.max_images_per_page,
+                        inst_deadline,
+                        institution_timeout,
+                        inst_start_time,
+                        timeout_pages,
+                    )
+                except InstitutionTimeoutError as exc:
+                    add_failure(failures, inst, exc.url, exc.stage, exc)
+                    skip_institution = True
+                    break
                 for event in events:
                     row = {
                         "institution_id": inst.institution_id,
@@ -1703,11 +2064,13 @@ def run_pipeline(args: argparse.Namespace) -> None:
         interrupted = True
         print("[WARN] Interrupted by user. Saving partial results...")
     finally:
-        saved_rows, saved_failed = save_progress(
+        saved_rows, saved_failed, saved_timeout_pages = save_progress(
             output_csv,
             failed_domains_out,
+            timeout_pages_out,
             event_rows,
             failures,
+            timeout_pages,
             args.min_confidence,
         )
         save_run_progress(
@@ -1717,9 +2080,11 @@ def run_pipeline(args: argparse.Namespace) -> None:
             total_institutions=total_institutions,
             saved_rows=saved_rows,
             saved_failed=saved_failed,
+            saved_timeout_pages=saved_timeout_pages,
         )
         print(f"Saved {saved_rows} exhibition rows -> {output_csv}")
         print(f"Saved {saved_failed} failed domains -> {failed_domains_out}")
+        print(f"Saved {saved_timeout_pages} timeout pages -> {timeout_pages_out}")
         if interrupted:
             print("[SAVE] Partial results were saved after interruption.")
 
@@ -1732,6 +2097,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--failed-domains-out",
         default=DEFAULT_FAILED_DOMAINS_OUT,
         help="Output CSV for failed domain summary",
+    )
+    parser.add_argument(
+        "--timeout-pages-out",
+        default=DEFAULT_TIMEOUT_PAGES_OUT,
+        help="Output CSV for pages skipped due to per-institution timeout",
     )
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS, help="HTTP timeout seconds")
     parser.add_argument("--pause", type=float, default=DEFAULT_PAUSE_SECONDS, help="Pause between page requests")
