@@ -16,7 +16,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
-DEFAULT_INPUT_CSV = "data/test_naver_local_exhibitions.csv"
+DEFAULT_INPUT_CSV = "data/naver_local_exhibitions.csv"
 DEFAULT_OUTPUT_CSV = "data/extracted_exhibitions.csv"
 DEFAULT_FAILED_DOMAINS_OUT = "data/failed_domains.csv"
 DEFAULT_TIMEOUT_PAGES_OUT = "data/timeout_pages.csv"
