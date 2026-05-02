@@ -14,6 +14,15 @@ try:
 except Exception:  # pragma: no cover - playwright optional
     sync_playwright = None  # type: ignore
 
+try:
+    # Prefer using the pipeline helper to record failures as FailureRecord
+    from collect_exhibition_events import add_failure
+except Exception:
+    try:
+        from src.collect_exhibition_events import add_failure
+    except Exception:
+        add_failure = None
+
 
 # Lightweight date regexes reused from main pipeline heuristics
 DATE_RANGE_PATTERN = re.compile(
@@ -234,33 +243,66 @@ def extract_events_from_instagram(institution: Institution, instagram_url: str, 
                         }
                     )
                 except Exception as exc:  # noqa: BLE001
-                    failures.append(
-                        {
-                            "institution_id": institution.institution_id,
-                            "institution_title": institution.title,
-                            "domain": "instagram.com",
-                            "url": post_url,
-                            "stage": "instagram-post",
-                            "error_type": type(exc).__name__,
-                            "error_message": str(exc),
-                        }
-                    )
+                    if add_failure:
+                        try:
+                            add_failure(failures, institution, post_url, "instagram-post", exc)
+                        except Exception:
+                            # fallback to dict if helper fails for any reason
+                            failures.append(
+                                {
+                                    "institution_id": institution.institution_id,
+                                    "institution_title": institution.title,
+                                    "domain": "instagram.com",
+                                    "url": post_url,
+                                    "stage": "instagram-post",
+                                    "error_type": type(exc).__name__,
+                                    "error_message": str(exc),
+                                }
+                            )
+                    else:
+                        failures.append(
+                            {
+                                "institution_id": institution.institution_id,
+                                "institution_title": institution.title,
+                                "domain": "instagram.com",
+                                "url": post_url,
+                                "stage": "instagram-post",
+                                "error_type": type(exc).__name__,
+                                "error_message": str(exc),
+                            }
+                        )
                 _sleep_with_jitter(per_post_delay, jitter_seconds=1.5)
                 _sleep_random_range(random_delay_min, random_delay_max)
 
             context.close()
             browser.close()
     except Exception as exc:  # pragma: no cover - runtime guard
-        failures.append(
-            {
-                "institution_id": institution.institution_id,
-                "institution_title": institution.title,
-                "domain": "instagram.com",
-                "url": instagram_url,
-                "stage": "instagram-profile",
-                "error_type": type(exc).__name__,
-                "error_message": str(exc),
-            }
-        )
+        if add_failure:
+            try:
+                add_failure(failures, institution, instagram_url, "instagram-profile", exc)
+            except Exception:
+                failures.append(
+                    {
+                        "institution_id": institution.institution_id,
+                        "institution_title": institution.title,
+                        "domain": "instagram.com",
+                        "url": instagram_url,
+                        "stage": "instagram-profile",
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                    }
+                )
+        else:
+            failures.append(
+                {
+                    "institution_id": institution.institution_id,
+                    "institution_title": institution.title,
+                    "domain": "instagram.com",
+                    "url": instagram_url,
+                    "stage": "instagram-profile",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                }
+            )
 
     return results
