@@ -1,0 +1,14 @@
+# Keep the raw input CSV needed to reproduce this workflow.
+!data/
+!data/naver_local_exhibitions_mod.csv
+
+# Ignore generated outputs by default.
+data/*.tmp
+data/naver_local_exhibitions_art_verified.csv
+data/naver_local_exhibitions_art_candidates_yes_maybe.csv
+data/naver_local_exhibitions_exhibition_url_candidates.csv
+data/naver_local_exhibitions_exhibition_url_candidates_sorted.csv
+
+# Python cache
+__pycache__/
+*.py[cod]
