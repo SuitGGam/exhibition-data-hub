@@ -31,8 +31,8 @@ from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 
-DEFAULT_INPUT = str(Path("data") / "naver_local_exhibitions_mod.csv")
-DEFAULT_OUTPUT = str(Path("data") / "naver_local_exhibitions_art_verified.csv")
+DEFAULT_INPUT_NAME = "naver_local_exhibitions_mod.csv"
+DEFAULT_OUTPUT_NAME = "naver_local_exhibitions_art_verified.csv"
 
 # Optional Naver Search OpenAPI credentials.
 # You can paste keys here if you do not want to set PowerShell environment variables.
@@ -556,6 +556,10 @@ def load_env_file(env_file: str = "") -> None:
                 os.environ.setdefault(key, value)
 
 
+def default_data_path(filename: str) -> str:
+    return str(Path(os.getenv("ARTMOA_DATA_DIR", "data")) / filename)
+
+
 def get_naver_credentials(client_id: str = "", client_secret: str = "") -> tuple[str, str]:
     resolved_id = normalize_space(client_id) or normalize_space(NAVER_CLIENT_ID) or normalize_space(os.getenv("NAVER_CLIENT_ID"))
     resolved_secret = (
@@ -819,8 +823,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Filter and verify art-related exhibition venues from a Naver local CSV."
     )
-    parser.add_argument("-i", "--input", default=DEFAULT_INPUT, help="Input CSV path.")
-    parser.add_argument("-o", "--output", default=DEFAULT_OUTPUT, help="Output CSV path.")
+    parser.add_argument("-i", "--input", default="", help="Input CSV path. Defaults to ARTMOA_DATA_DIR/input filename.")
+    parser.add_argument("-o", "--output", default="", help="Output CSV path. Defaults to ARTMOA_DATA_DIR/output filename.")
     parser.add_argument("--encoding", default="utf-8-sig", help="Input/output CSV encoding.")
     parser.add_argument("--env-file", default="", help="Optional .env file path for NAVER_CLIENT_ID/SECRET.")
     parser.add_argument(
@@ -873,6 +877,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     load_env_file(args.env_file)
+    args.input = args.input or default_data_path(DEFAULT_INPUT_NAME)
+    args.output = args.output or default_data_path(DEFAULT_OUTPUT_NAME)
     started = time.time()
 
     rows, fieldnames = read_csv_rows(args.input, args.encoding)

@@ -17,6 +17,9 @@ venv/
 
 # Data outputs
 *.log
+data/*.csv
+data/*.json
+!data/.gitkeep
 data/*_test.csv
 data/*_smoke.csv
 data/tmp.csv

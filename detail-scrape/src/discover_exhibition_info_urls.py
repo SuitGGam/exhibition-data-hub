@@ -28,8 +28,8 @@ from urllib.parse import parse_qsl, quote, unquote, urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 
-DEFAULT_INPUT = str(Path("data") / "naver_local_exhibitions_art_candidates_yes_maybe.csv")
-DEFAULT_OUTPUT = str(Path("data") / "naver_local_exhibitions_exhibition_url_candidates.csv")
+DEFAULT_INPUT_NAME = "naver_local_exhibitions_art_candidates_yes_maybe.csv"
+DEFAULT_OUTPUT_NAME = "naver_local_exhibitions_exhibition_url_candidates.csv"
 
 # Optional Naver Search OpenAPI credentials.
 # Paste keys here if you do not want to set environment variables or CLI options.
@@ -386,6 +386,10 @@ def load_env_file(env_file: str = "") -> None:
             value = value.strip().strip('"').strip("'")
             if key:
                 os.environ.setdefault(key, value)
+
+
+def default_data_path(filename: str) -> str:
+    return str(Path(os.getenv("ARTMOA_DATA_DIR", "data")) / filename)
 
 
 def choose_homepage(row: dict[str, str]) -> str:
@@ -1059,6 +1063,8 @@ def output_row(
 
 def run(args: argparse.Namespace) -> int:
     load_env_file(args.env_file)
+    args.input = args.input or default_data_path(DEFAULT_INPUT_NAME)
+    args.output = args.output or default_data_path(DEFAULT_OUTPUT_NAME)
     started = time.time()
     rows = read_rows(args.input, args.encoding)
     if args.limit:
@@ -1145,8 +1151,8 @@ def print_summary(rows: list[dict[str, str]], elapsed: float) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Discover likely exhibition-list URLs for venue homepages.")
-    parser.add_argument("-i", "--input", default=DEFAULT_INPUT, help="Input yes/maybe venue CSV.")
-    parser.add_argument("-o", "--output", default=DEFAULT_OUTPUT, help="Output candidate URL CSV.")
+    parser.add_argument("-i", "--input", default="", help="Input yes/maybe venue CSV. Defaults to ARTMOA_DATA_DIR/input filename.")
+    parser.add_argument("-o", "--output", default="", help="Output candidate URL CSV. Defaults to ARTMOA_DATA_DIR/output filename.")
     parser.add_argument("--encoding", default="utf-8-sig", help="Input/output CSV encoding.")
     parser.add_argument("--env-file", default="", help="Optional .env file path for NAVER_CLIENT_ID/SECRET.")
     parser.add_argument("--top-n", type=int, default=5, help="Candidate URLs to keep per venue.")
