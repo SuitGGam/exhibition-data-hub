@@ -1,0 +1,28 @@
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments and IDE state
+.venv/
+.venvScriptsactivate/
+venv/
+.idea/
+
+# Local data outputs
+*.log
+data/*.csv
+data/*.json
+detail-scrape/data/*.csv
+detail-scrape/data/*.json
+!detail-scrape/data/.gitkeep
+
+# OS junk files
+.DS_Store
+Thumbs.db
