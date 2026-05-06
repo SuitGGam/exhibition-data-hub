@@ -318,3 +318,47 @@ python src/collect_exhibition_events.py --start-index 3513 --end-index 5268
 
 - .env, 캐시, 가상환경, 테스트/스모크 산출물 CSV는 .gitignore로 제외합니다.
 - 기본 입력/대표 결과 파일은 필요에 따라 유지할 수 있습니다.
+
+# Art Venue Filtering and Exhibition URL Discovery
+
+The DJ branch includes a venue filtering and candidate URL discovery workflow
+for the ArtMoa exhibition pipeline.
+
+Current local environment used for this workflow:
+
+```text
+OS: Windows
+Python: 3.11.2
+Shell: Git Bash(MINGW64) or PowerShell
+Local data folder: C:\Users\dvkim\OneDrive\바탕 화면\크롤링3
+```
+
+No extra runtime packages are required for these added scripts. They use only
+the Python standard library and the existing Naver OpenAPI credentials.
+
+Copy `.env.example` to `.env` and fill in:
+
+```text
+NAVER_CLIENT_ID=
+NAVER_CLIENT_SECRET=
+```
+
+Added scripts:
+
+```text
+src/classify_art_exhibition_venues.py
+src/filter_art_candidates.py
+src/discover_exhibition_info_urls.py
+src/sort_exhibition_url_candidates.py
+```
+
+Workflow:
+
+```bash
+python ./src/classify_art_exhibition_venues.py --search-naver-urls --verify-urls -o "C:\Users\dvkim\OneDrive\바탕 화면\크롤링3\naver_local_exhibitions_art_verified.csv"
+python ./src/filter_art_candidates.py
+python ./src/discover_exhibition_info_urls.py --use-naver-search --top-n 5 --probe-pages 5 --workers 10
+python ./src/sort_exhibition_url_candidates.py
+```
+
+Large CSV/XLSX outputs and local progress files are ignored by git by default.

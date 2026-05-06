@@ -6,7 +6,11 @@ __pycache__/
 
 # Virtual environments
 .venv/
+.venvScriptsactivate/
 venv/
+
+# IDE
+.idea/
 
 # Environment variables
 .env
@@ -20,6 +24,11 @@ data/discovered_exhibition_pages.csv
 data/filtered_exhibition_institutions.csv
 data/rejected_exhibitions.csv
 data/curated_exhibitions.csv
+data/exhibition_extraction_progress_*.json
+data/extracted_exhibitions_*.csv
+data/failed_domains.csv
+data/naver_local_exhibitions_art_*.csv
+data/naver_local_exhibitions_exhibition_url_candidates*.csv
 
 # OS junk files
 .DS_Store
