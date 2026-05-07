@@ -1137,10 +1137,22 @@ def process_list_page(
     detail_cache: dict[str, str] = {}
     list_html_for_detail = render_html or html_text
     for event in events:
+        event["failure_stage"] = ""
+        event["failure_type"] = ""
+        event["failure_message"] = ""
+        event_failure_start = len(failures)
         detail_url = normalize_text(event.get("detail_url", ""))
         if not detail_url:
+            failure_stage, failure_type, failure_message = summarize_failures(failures[event_failure_start:])
+            event["failure_stage"] = failure_stage
+            event["failure_type"] = failure_type
+            event["failure_message"] = failure_message
             continue
         if not should_run_detail(detail_fetch_mode, needs_detail_fields(event)):
+            failure_stage, failure_type, failure_message = summarize_failures(failures[event_failure_start:])
+            event["failure_stage"] = failure_stage
+            event["failure_type"] = failure_type
+            event["failure_message"] = failure_message
             continue
 
         if detail_url == final_url or detail_url == list_url:
@@ -1168,6 +1180,11 @@ def process_list_page(
             max_images,
             failures,
         )
+
+        failure_stage, failure_type, failure_message = summarize_failures(failures[event_failure_start:])
+        event["failure_stage"] = failure_stage
+        event["failure_type"] = failure_type
+        event["failure_message"] = failure_message
 
     valid_events = [event for event in events if is_event_valid(event)]
     current_events = [event for event in valid_events if is_event_current(event, today)]
@@ -1362,6 +1379,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
                         except Exception:
                             from collect_instagram import extract_events_from_instagram, Institution as IgInstitution
 
+                        instagram_failure_start = len(failures)
                         inst = IgInstitution(
                             institution_id=f"list-{idx + 1:05d}",
                             title=row.get("institution_name", "") or list_url,
@@ -1373,6 +1391,9 @@ def run_pipeline(args: argparse.Namespace) -> None:
                             source_query="",
                         )
                         ig_events = extract_events_from_instagram(inst, list_url, args, failures)
+                        instagram_failure_stage, instagram_failure_type, instagram_failure_message = summarize_failures(
+                            failures[instagram_failure_start:]
+                        )
                         for event in ig_events:
                             page_events.append(
                                 {
@@ -1381,6 +1402,9 @@ def run_pipeline(args: argparse.Namespace) -> None:
                                     "end_date": event.get("end_date", ""),
                                     "location": "",
                                     "detail_url": list_url,
+                                    "failure_stage": instagram_failure_stage,
+                                    "failure_type": instagram_failure_type,
+                                    "failure_message": instagram_failure_message,
                                 }
                             )
                         valid_events = [evt for evt in page_events if is_event_valid(evt)]
@@ -1407,16 +1431,16 @@ def run_pipeline(args: argparse.Namespace) -> None:
                 valid_count = 0
 
             page_failures = failures[failure_start:]
-            failure_stage, failure_type, failure_message = summarize_failures(page_failures)
+            page_failure_stage, page_failure_type, page_failure_message = summarize_failures(page_failures)
 
             if page_events:
                 for event in page_events:
                     record = normalize_event(event)
                     record["source_list_url"] = list_url
                     record["status"] = "ok"
-                    record["failure_stage"] = failure_stage
-                    record["failure_type"] = failure_type
-                    record["failure_message"] = failure_message
+                    record["failure_stage"] = normalize_text(event.get("failure_stage", ""))
+                    record["failure_type"] = normalize_text(event.get("failure_type", ""))
+                    record["failure_message"] = normalize_text(event.get("failure_message", ""))
                     for col in pass_through_columns:
                         record[col] = normalize_text(row.get(col, ""))
                     events.append(record)
@@ -1424,12 +1448,12 @@ def run_pipeline(args: argparse.Namespace) -> None:
                 status = "failed"
                 if valid_count > 0:
                     status = "filtered"
-                    if not failure_stage:
-                        failure_stage = "filtered"
-                    if not failure_type:
-                        failure_type = "Filtered"
-                    if not failure_message:
-                        failure_message = "Filtered out by end_date < today"
+                    if not page_failure_stage:
+                        page_failure_stage = "filtered"
+                    if not page_failure_type:
+                        page_failure_type = "Filtered"
+                    if not page_failure_message:
+                        page_failure_message = "Filtered out by end_date < today"
 
                 failure_record = {
                     "exhibition_name": "",
@@ -1439,9 +1463,9 @@ def run_pipeline(args: argparse.Namespace) -> None:
                     "detail_url": "",
                     "source_list_url": list_url,
                     "status": status,
-                    "failure_stage": failure_stage or "no-events",
-                    "failure_type": failure_type or "NoEvents",
-                    "failure_message": failure_message or "No events extracted",
+                    "failure_stage": page_failure_stage or "no-events",
+                    "failure_type": page_failure_type or "NoEvents",
+                    "failure_message": page_failure_message or "No events extracted",
                 }
                 for col in pass_through_columns:
                     failure_record[col] = normalize_text(row.get(col, ""))
