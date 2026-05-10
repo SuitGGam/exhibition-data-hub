@@ -25,6 +25,7 @@ DEFAULT_INPUT_CSV = "data/exhibition_list_pages.csv"
 DEFAULT_OUTPUT_CSV = "data/extracted_exhibitions.csv"
 DEFAULT_FAILED_PAGES_OUT = "data/failed_pages.csv"
 DEFAULT_TIMEOUT_SECONDS = 10.0
+DEFAULT_PAGE_TIMEOUT_SECONDS = 300.0
 DEFAULT_PAUSE_SECONDS = 0.2
 DEFAULT_HTTP_RETRY_COUNT = 2
 DEFAULT_DETAIL_FETCH_MODE = "auto"
@@ -57,7 +58,31 @@ FAILED_PAGE_FIELDNAMES = [
     "source_title",
 ]
 
-BLOCK_TAGS = {"li", "article", "tr", "div", "section"}
+BLOCK_TAGS = {
+    "article",
+    "aside",
+    "dd",
+    "div",
+    "dl",
+    "dt",
+    "figcaption",
+    "figure",
+    "footer",
+    "header",
+    "li",
+    "main",
+    "nav",
+    "ol",
+    "section",
+    "table",
+    "tbody",
+    "td",
+    "tfoot",
+    "th",
+    "thead",
+    "tr",
+    "ul",
+}
 LINE_BREAK_TAGS = {
     "br",
     "p",
@@ -66,12 +91,31 @@ LINE_BREAK_TAGS = {
     "div",
     "section",
     "article",
+    "aside",
+    "dd",
+    "dl",
+    "dt",
+    "figcaption",
+    "figure",
+    "footer",
     "h1",
     "h2",
     "h3",
     "h4",
     "h5",
     "h6",
+    "header",
+    "hr",
+    "main",
+    "nav",
+    "ol",
+    "table",
+    "tbody",
+    "td",
+    "tfoot",
+    "th",
+    "thead",
+    "ul",
 }
 
 DATE_RANGE_PATTERN = re.compile(
@@ -88,28 +132,78 @@ ADDRESS_PATTERNS = [
 
 EXCLUDE_EVENT_TEXT_KEYWORDS = [
     "채용",
+    "채용공고",
     "공고",
+    "공지",
+    "공지사항",
+    "알림",
     "합격자",
     "서류심사",
     "면접",
     "모집",
+    "지원",
+    "접수",
     "일자리",
+    "인턴",
+    "오픈콜",
+    "공모",
+    "대관",
+    "휴관",
+    "휴무",
+    "보도자료",
+    "언론",
     "FAQ",
     "문의",
+    "교육",
+    "강연",
+    "세미나",
+    "워크숍",
+    "포럼",
+    "토크",
+    "상영",
+    "공연",
+    "콘서트",
+    "컨퍼런스",
+    "대회",
+    "recruit",
+    "job",
+    "application",
+    "press",
+    "notice",
 ]
 
 STRONG_EVENT_TITLE_KEYWORDS = [
     "전시회",
     "개인전",
     "기획전",
+    "기획전시",
     "특별전",
+    "특별전시",
     "초대전",
     "그룹전",
+    "단체전",
+    "상설전",
+    "회고전",
+    "소장품전",
+    "아카이브전",
+    "프로젝트전",
+    "국제전",
+    "온라인전",
     "아트페어",
     "비엔날레",
     "트리엔날레",
     "사진전",
     "조각전",
+    "회화전",
+    "드로잉전",
+    "판화전",
+    "공예전",
+    "도예전",
+    "디자인전",
+    "건축전",
+    "영상전",
+    "미디어아트",
+    "일러스트전",
     "졸업전시",
     "학위청구",
     "오픈스튜디오",
@@ -118,10 +212,21 @@ STRONG_EVENT_TITLE_KEYWORDS = [
 
 EVENT_HINT_KEYWORDS = [
     "전시",
+    "전람",
     "exhibition",
+    "exhibit",
+    "expo",
     "show",
+    "showcase",
     "gallery",
     "museum",
+    "art",
+    "fair",
+    "biennale",
+    "triennale",
+    "아트",
+    "갤러리",
+    "뮤지엄",
 ]
 
 GENERIC_EVENT_LABELS = {
@@ -131,6 +236,21 @@ GENERIC_EVENT_LABELS = {
     "예정전시",
     "과거전시",
     "전시기간",
+    "전시소개",
+    "전시일정",
+    "전시정보",
+    "전시현황",
+    "전시개요",
+    "전시목록",
+    "전시작품",
+    "전시자료",
+    "전시공간",
+    "전시관",
+    "전시장",
+    "관람안내",
+    "전시관람",
+    "전시포스터",
+    "전시사진",
     "전시장소",
     "전시안내",
 }
@@ -138,11 +258,25 @@ GENERIC_EVENT_LABELS = {
 GENERIC_LINK_TEXTS = {
     "상세",
     "상세보기",
+    "자세히 보기",
+    "자세히보기",
     "자세히",
     "더보기",
+    "더 보기",
+    "보기",
+    "바로가기",
+    "이동",
+    "링크",
     "view",
     "detail",
+    "details",
+    "detail view",
+    "more",
+    "more info",
     "read more",
+    "see more",
+    "show more",
+    "open",
 }
 
 IMAGE_EXT_PATTERN = re.compile(r"\.(?:png|jpg|jpeg|webp|gif)(?:$|[?#])", re.IGNORECASE)
@@ -1095,16 +1229,38 @@ def process_list_page(
     js_render_mode: str,
     ocr_mode: str,
     timeout_seconds: float,
+    page_timeout_seconds: float,
     js_timeout_ms: int,
     ocr_timeout_seconds: float,
     max_images: int,
     failures: list[FailureRecord],
     today: date,
 ) -> tuple[list[dict[str, str]], int]:
+    page_timeout_seconds = max(1.0, float(page_timeout_seconds))
+    deadline = time.monotonic() + page_timeout_seconds
+
+    def remaining_seconds() -> float:
+        return deadline - time.monotonic()
+
+    def ensure_time(stage: str) -> bool:
+        if remaining_seconds() <= 0:
+            add_failure(
+                failures,
+                None,
+                list_url,
+                "page-timeout",
+                TimeoutError(f"Page processing exceeded {page_timeout_seconds:.0f}s at {stage}"),
+            )
+            return False
+        return True
+
     html_text = ""
     final_url = list_url
     try:
-        html_text, final_url = http_get(list_url, timeout_seconds)
+        if not ensure_time("fetch"):
+            return [], 0
+        fetch_timeout = min(timeout_seconds, max(0.5, remaining_seconds()))
+        html_text, final_url = http_get(list_url, fetch_timeout)
     except (HTTPError, URLError, TimeoutError, ValueError, RuntimeError, OSError) as exc:
         add_failure(failures, None, list_url, "fetch", exc)
         return [], 0
@@ -1117,7 +1273,10 @@ def process_list_page(
     render_html = ""
     if should_render:
         try:
-            render_html = render_page_with_playwright(list_url, js_timeout_ms)
+            if not ensure_time("js-render"):
+                return [], 0
+            render_timeout_ms = min(js_timeout_ms, max(1000, int(remaining_seconds() * 1000)))
+            render_html = render_page_with_playwright(list_url, render_timeout_ms)
         except Exception as exc:
             add_failure(failures, None, list_url, "js-render", exc)
         if render_html:
@@ -1129,7 +1288,10 @@ def process_list_page(
     if should_ocr:
         try:
             effective_html = render_html or html_text
-            ocr_events = extract_ocr_events(effective_html, final_url, max_images, ocr_timeout_seconds)
+            if not ensure_time("ocr"):
+                return [], 0
+            ocr_timeout = min(ocr_timeout_seconds, max(1.0, remaining_seconds()))
+            ocr_events = extract_ocr_events(effective_html, final_url, max_images, ocr_timeout)
             events = dedupe_events(list(events) + ocr_events)
         except Exception as exc:
             add_failure(failures, None, list_url, "ocr", exc)
@@ -1137,6 +1299,8 @@ def process_list_page(
     detail_cache: dict[str, str] = {}
     list_html_for_detail = render_html or html_text
     for event in events:
+        if not ensure_time("detail-loop"):
+            return [], 0
         event["failure_stage"] = ""
         event["failure_type"] = ""
         event["failure_message"] = ""
@@ -1161,7 +1325,10 @@ def process_list_page(
             cached = detail_cache.get(detail_url)
             if cached is None:
                 try:
-                    detail_html, _ = http_get(detail_url, timeout_seconds)
+                    if not ensure_time("detail-fetch"):
+                        return [], 0
+                    detail_timeout = min(timeout_seconds, max(0.5, remaining_seconds()))
+                    detail_html, _ = http_get(detail_url, detail_timeout)
                     detail_cache[detail_url] = detail_html
                 except (HTTPError, URLError, TimeoutError, ValueError, RuntimeError, OSError) as exc:
                     add_failure(failures, None, detail_url, "detail-fetch", exc)
@@ -1169,14 +1336,17 @@ def process_list_page(
             else:
                 detail_html = cached
 
+        if not ensure_time("detail-enrich"):
+            return [], 0
+        remaining = max(1.0, remaining_seconds())
         enrich_event_from_detail(
             event,
             detail_url,
             detail_html,
             js_render_mode,
             ocr_mode,
-            js_timeout_ms,
-            ocr_timeout_seconds,
+            min(js_timeout_ms, int(remaining * 1000)),
+            min(ocr_timeout_seconds, remaining),
             max_images,
             failures,
         )
@@ -1213,6 +1383,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Detail-page fetch mode (auto=only if fields missing, always=always fetch, off=disable)",
     )
     parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="Fetch timeout seconds")
+    parser.add_argument(
+        "--page-timeout-seconds",
+        type=float,
+        default=DEFAULT_PAGE_TIMEOUT_SECONDS,
+        help="Max seconds allowed per list page before skipping",
+    )
     parser.add_argument("--pause-seconds", type=float, default=DEFAULT_PAUSE_SECONDS, help="Pause between pages")
     parser.add_argument(
         "--js-render-mode",
@@ -1419,6 +1595,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
                         js_render_mode=str(args.js_render_mode),
                         ocr_mode=str(args.ocr_mode),
                         timeout_seconds=float(args.timeout_seconds),
+                        page_timeout_seconds=float(args.page_timeout_seconds),
                         js_timeout_ms=int(args.js_render_timeout_ms),
                         ocr_timeout_seconds=float(args.ocr_timeout_seconds),
                         max_images=int(args.max_images_per_page),
